@@ -1,0 +1,5 @@
+SUPABASE_SECRET_KEY=sb_secret_...
+TOKEN_KEY=            # openssl rand -base64 32
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+ANTHROPIC_API_KEY=

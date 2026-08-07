@@ -1,0 +1,19 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-clay-50: #faf7f4;
+  --color-clay-100: #f2ece5;
+  --color-clay-200: #e3d8cc;
+  --color-clay-600: #8a6f57;
+  --color-clay-900: #33281f;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-clay-50 text-clay-900 antialiased;
+}

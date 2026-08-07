@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["@cloudflare/workers-types", "vite/client"]
+  },
+  // scripts/ is excluded on purpose: it runs under Node, and @types/node's
+  // globals collide with @cloudflare/workers-types if both are in scope here.
+  "include": ["src", "worker", "shared"]
+}

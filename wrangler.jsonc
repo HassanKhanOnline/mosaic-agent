@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mosaic-agent",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": { "enabled": true },
+
+  // Original images and thumbnails. Postgres holds the key, R2 holds the bytes.
+  "r2_buckets": [
+    { "binding": "BUCKET", "bucket_name": "mosaic-agent-images" }
+  ],
+
+  // Text embeddings for the semantic half of search (@cf/baai/bge-m3, 1024-wide).
+  "ai": { "binding": "AI" },
+
+  // Used to make 400px webp thumbnails at ingest. If Images is not enabled on
+  // the account the ingest still succeeds — thumb_key is left null and the UI
+  // falls back to the original.
+  "images": { "binding": "IMAGES" },
+
+  // Ingest and tagging run as cron batches rather than one long job: each tick
+  // takes the next slice of work and advances a checkpoint in Postgres, so a
+  // crash or a deploy mid-backfill loses at most one batch.
+  "triggers": {
+    "crons": ["* * * * *", "*/15 * * * *"]
+  },
+
+  "vars": {
+    "MAILBOX": "info@tellustile.com",
+    "SUPABASE_URL": "https://izeineiwbhfsbgsspisz.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_DMpvVj9VHcW7MDymRw-jRg_zjwHENj-",
+    "APP_URL": "http://localhost:5173"
+  }
+
+  // Secrets — `wrangler secret put` in production, .dev.vars locally:
+  //   SUPABASE_SECRET_KEY   bypasses RLS; the pipeline writes with it
+  //   GOOGLE_CLIENT_ID      OAuth client for the Gmail connect flow
+  //   GOOGLE_CLIENT_SECRET
+  //   TOKEN_KEY             base64 32 bytes, AES-GCM over the refresh token
+  //   ANTHROPIC_API_KEY     vision tagging
+}

@@ -1,0 +1,36 @@
+{
+  "name": "mosaic-agent",
+  "private": true,
+  "type": "module",
+  "allowScripts": {
+    "esbuild": true,
+    "workerd": true
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "tsc -b --noEmit false || true && vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "probe": "node --experimental-strip-types scripts/probe.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@supabase/supabase-js": "^2.58.0",
+    "hono": "^4.9.10",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "wrangler": "^4.42.0"
+  }
+}
