@@ -26,30 +26,44 @@ before that; a Workflow checkpoints each step and picks up where it stopped.
 
 ## The blocker to start on today
 
-`gmail.readonly` is a **restricted** scope. Because outside clients will be
-connecting their own mailboxes, Google requires:
+`gmail.readonly` is a **restricted** scope, which is a serious obstacle if
+outside clients are connecting their own mailboxes — verification, a paid CASA
+security assessment, weeks of review.
 
-1. OAuth app verification (brand review, privacy policy, demo video), and
-2. a **CASA Tier 2 security assessment** by an authorised third-party
-   assessor — paid, repeated annually, and typically several weeks end to end.
+None of that applies here. One mailbox, ours. Which path to take depends only
+on whether that mailbox sits in a Google Workspace or is a plain `@gmail.com`:
 
-Until that clears, the app is capped at **100 test users** added by hand in the
-Google Cloud console. That is genuinely enough to run your first clients, so
-the build isn't blocked — but start the verification paperwork in parallel with
-development, not after it, because the assessment is the long pole.
+**Workspace mailbox — publish the OAuth app as "Internal".** No verification,
+no assessment, no review at all. Refresh tokens do not expire. Authorise once
+and the sync keeps running. This is the path to take if it is available.
 
-Two things that make the review go easier, both already in this design:
+**Workspace, and you would rather it be headless** — a service account with
+domain-wide delegation, granted by the Workspace admin. No consent screen ever,
+no token to refresh, and the job can read the mailbox unattended. Slightly more
+admin setup; strictly better for a background pipeline.
+
+**Consumer `@gmail.com` — publish status stays "Testing", with the account
+added as a test user.** Works immediately and costs nothing, with one catch
+worth knowing before it bites: **refresh tokens issued by an app in Testing
+expire after 7 days.** The sync then dies with `invalid_grant` until someone
+re-authorises. For a single mailbox that is survivable — the UI carries a
+"reconnect" button and the job alerts instead of failing silently — but it is a
+weekly chore, and it is the reason to prefer a Workspace mailbox if the tile
+business has one.
+
+The code is identical in all three cases. Only the Google Cloud console setup
+differs, so this decision does not block the build.
+
+Regardless of path, two rules hold:
 
 - Request only `gmail.readonly`. Nothing else. No send, no modify.
-- Only fetch threads matching `has:attachment`. When the reviewer asks why you
-  need a restricted scope, "we read attachment-bearing threads to index product
-  photos, and store nothing else" is a far better answer than "we copy the
-  mailbox".
+- Only fetch threads matching `has:attachment` — a fraction of the mailbox, and
+  the same tagging signal.
 
 ## Pipeline
 
 ```
-1  connect     OAuth consent → refresh token, encrypted, per account
+1  connect     OAuth consent → refresh token, encrypted, stored once
 2  discover    messages.list  q="has:attachment -in:spam -in:trash"
                  → page through ids, checkpointing pageToken
 3  fetch       threads.get per thread → all messages, headers, bodies
@@ -130,15 +144,19 @@ Image-similarity search ("find tiles that look like this photo") is a later
 addition — a CLIP-style embedding in a second vector column. The schema leaves
 room; don't build it in v1.
 
-## Privacy, since this is someone else's mailbox
+## Handling the mailbox
+
+It is our own mailbox, so this is short — but it still holds years of customer
+correspondence, which is worth handling deliberately:
 
 - Refresh tokens encrypted at rest, never in logs, never sent to the browser.
-- Row-level security on every table, keyed by `tenant_id`. A client's team sees
-  only their own library.
+- The Gmail credentials table is service-role only. The React app cannot read
+  it under any policy.
 - Email bodies stored only for attachment-bearing threads, and only as text.
-- A disconnect button that actually deletes: revoke at Google, drop rows, purge
-  R2. Google's reviewers ask about this specifically.
-- Retention setting per tenant, defaulting to "keep until disconnected".
+- Search is behind login. Every team member sees the whole library — there is
+  no per-user partitioning, because there is one business here.
+- A disconnect action that actually deletes: revoke at Google, drop rows, purge
+  R2.
 
 ## Cost sketch, 50k emails
 
@@ -157,9 +175,9 @@ not per occurrence.
 ## Build order
 
 1. Probe script — count messages, attachment threads and rough image volume in
-   one real mailbox. Confirms the estimates above before anything is committed.
-2. Schema + RLS.
-3. OAuth connect flow, token storage, test-user mode.
+   the real mailbox. Confirms the estimates above before anything is committed.
+2. Schema.
+3. OAuth connect flow and token storage.
 4. Backfill Workflow through step 8 (store, no AI yet). Now you can eyeball
    what actually came out and tune the filters against real data.
 5. Tagging queue + vocabulary.
