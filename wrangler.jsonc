@@ -1,6 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mosaic-agent",
+  // Hassankhanonline@gmail.com. Pinned because the Wrangler login can see two
+  // accounts and every deploy would otherwise prompt.
+  "account_id": "39d4ad99139f7e534d36d73d0357849f",
   "main": "worker/index.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
