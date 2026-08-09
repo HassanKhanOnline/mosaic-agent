@@ -38,7 +38,10 @@
     "MAILBOX": "info@tellustile.com",
     "SUPABASE_URL": "https://izeineiwbhfsbgsspisz.supabase.co",
     "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_DMpvVj9VHcW7MDymRw-jRg_zjwHENj-",
-    "APP_URL": "http://localhost:5173"
+    // Also the OAuth redirect base — /auth/google/callback hangs off it, so
+    // this exact origin has to be in the Google client's authorised list.
+    // Change it here and in Google together, or the connect flow breaks.
+    "APP_URL": "https://mosaic-agent.hassankhanonline.workers.dev"
   }
 
   // Secrets — `wrangler secret put` in production, .dev.vars locally:
