@@ -13,15 +13,26 @@ const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
 export const auth = new Hono<{ Bindings: Env }>()
 
 auth.get('/google/callback', async (c) => {
+  // Every failure below lands back on the admin page with the reason in the
+  // banner. Returning a bare text page instead — as this used to — is
+  // indistinguishable from "nothing happened" to whoever clicked Connect, and
+  // leaves no trace of which step actually broke.
+  const back = (reason: string) =>
+    c.redirect(`${c.env.APP_URL}/admin?error=${encodeURIComponent(reason)}`)
+
   const code = c.req.query('code')
   const state = c.req.query('state')
-  const error = c.req.query('error')
+  const denied = c.req.query('error')
 
-  if (error) return c.redirect(`${c.env.APP_URL}/admin?error=${encodeURIComponent(error)}`)
-  if (!code || !state) return c.text('missing code or state', 400)
+  if (denied) return back(`Google returned "${denied}"`)
+  if (!code || !state) return back('Google did not send a code — try Connect again')
 
   const userId = await checkState(state, c.env.TOKEN_KEY)
-  if (!userId) return c.text('state expired or invalid', 400)
+  if (!userId) {
+    return back(
+      'The connect link expired before you finished. Click Connect Gmail again and complete it in one go.',
+    )
+  }
 
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -34,7 +45,7 @@ auth.get('/google/callback', async (c) => {
       grant_type: 'authorization_code',
     }),
   })
-  if (!res.ok) return c.text(`token exchange failed: ${await res.text()}`, 502)
+  if (!res.ok) return back(`Token exchange failed: ${(await res.text()).slice(0, 300)}`)
 
   const token = (await res.json()) as { access_token: string; refresh_token?: string }
   if (!token.refresh_token) {
@@ -42,10 +53,20 @@ auth.get('/google/callback', async (c) => {
     // for it explicitly. connectUrl() sets prompt=consent so this should not
     // happen, but without one the connection is useless the moment the access
     // token expires — better to say so than to store a dead row.
-    return c.redirect(`${c.env.APP_URL}/admin?error=no_refresh_token`)
+    return back(
+      'Google did not return a refresh token. Remove this app at myaccount.google.com/permissions, then connect again.',
+    )
   }
 
-  const profile = await gmail.getProfile(token.access_token)
+  // The first real call against the Gmail API, and where "API not enabled"
+  // surfaces. Catching it here turns a 500 into something actionable.
+  let profile: { emailAddress: string; historyId: string }
+  try {
+    profile = await gmail.getProfile(token.access_token)
+  } catch (err) {
+    return back(`Gmail API rejected the token — is the Gmail API enabled? ${String(err).slice(0, 300)}`)
+  }
+
   const sb = db(c.env)
 
   const { error: storeError } = await sb.from('gmail_accounts').upsert(
@@ -66,13 +87,7 @@ auth.get('/google/callback', async (c) => {
   // the admin page says "connected" — while nothing was stored, because the
   // table does not exist or a policy refused the write. The mailbox then looks
   // connected and never syncs. Fail loudly instead.
-  if (storeError) {
-    return c.redirect(
-      `${c.env.APP_URL}/admin?error=${encodeURIComponent(
-        `could not store the connection: ${storeError.message}`,
-      )}`,
-    )
-  }
+  if (storeError) return back(`Could not store the connection: ${storeError.message}`)
 
   return c.redirect(`${c.env.APP_URL}/admin?connected=${encodeURIComponent(profile.emailAddress)}`)
 })

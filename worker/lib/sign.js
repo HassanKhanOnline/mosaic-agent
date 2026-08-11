@@ -41,7 +41,11 @@ export async function checkImageUrl(sha256, variant, expires, signature, secret)
     return verify(`${sha256}:${variant}:${expires}`, signature, secret);
 }
 export async function signState(userId, secret) {
-    const expires = Math.floor(Date.now() / 1000) + 600;
+    // Half an hour, not the ten minutes this used to be. Consent is rarely one
+    // click the first time — it can detour through enabling an API, adding a
+    // test user, or picking between two signed-in Google accounts, and having
+    // the state expire mid-detour looks like the app silently doing nothing.
+    const expires = Math.floor(Date.now() / 1000) + 1800;
     const payload = `${userId}:${expires}`;
     return `${payload}:${await sign(payload, secret)}`;
 }
