@@ -10,7 +10,13 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // Without this, browser NAVIGATIONS to unmatched paths get index.html from
+    // the asset layer and the Worker never runs. API calls survived because
+    // fetch() is not a navigation — but Google's OAuth redirect is one, so the
+    // callback was swallowed and consent silently went nowhere. Cost a night
+    // of debugging against Google config that was fine all along.
+    "run_worker_first": ["/api/*", "/auth/*"]
   },
   "observability": { "enabled": true },
 
