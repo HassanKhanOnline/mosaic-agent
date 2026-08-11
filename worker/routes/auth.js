@@ -13,7 +13,13 @@ auth.get('/google/callback', async (c) => {
     // banner. Returning a bare text page instead — as this used to — is
     // indistinguishable from "nothing happened" to whoever clicked Connect, and
     // leaves no trace of which step actually broke.
-    const back = (reason) => c.redirect(`${c.env.APP_URL}/admin?error=${encodeURIComponent(reason)}`);
+    const back = (reason) => {
+        // Logged as well as shown, so a failed connect can be diagnosed from the
+        // Worker's logs afterwards rather than depending on someone reading the
+        // banner before they navigate away.
+        console.error('connect failed:', reason);
+        return c.redirect(`${c.env.APP_URL}/admin?error=${encodeURIComponent(reason)}`);
+    };
     const code = c.req.query('code');
     const state = c.req.query('state');
     const denied = c.req.query('error');
@@ -72,6 +78,7 @@ auth.get('/google/callback', async (c) => {
     // connected and never syncs. Fail loudly instead.
     if (storeError)
         return back(`Could not store the connection: ${storeError.message}`);
+    console.log('connect succeeded:', profile.emailAddress);
     return c.redirect(`${c.env.APP_URL}/admin?connected=${encodeURIComponent(profile.emailAddress)}`);
 });
 export function redirectUri(env) {

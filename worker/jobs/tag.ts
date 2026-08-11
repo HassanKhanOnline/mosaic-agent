@@ -9,6 +9,13 @@ import { NOT_A_TILE } from '../../shared/vocab'
 const ASSETS_PER_TICK = 4
 
 export async function tagTick(env: Env): Promise<{ tagged: number; remaining: number }> {
+  // No key, no AI tagging — and crucially, no failing. Without this guard the
+  // loop below would burn through every pending asset marking it rejected
+  // ("tagging_failed: missing api key"), which reads as the library silently
+  // emptying. Manual-first is a supported mode: assets stay pending, visible
+  // and hand-taggable, until a key appears and the backlog drains itself.
+  if (!env.ANTHROPIC_API_KEY) return { tagged: 0, remaining: -1 }
+
   const sb = db(env)
 
   const { data: pending, count } = await sb

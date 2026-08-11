@@ -7,6 +7,7 @@ type Facet = { key: string; label: string; values: TagRef[] }
 export default function Search() {
   const [facets, setFacets] = useState<Facet[]>([])
   const [selected, setSelected] = useState<string[]>([])
+  const [untagged, setUntagged] = useState(false)
   const [input, setInput] = useState('')
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
@@ -30,14 +31,14 @@ export default function Search() {
     setLoading(true)
     setError(null)
     api
-      .search(query, selected)
+      .search(query, selected, 0, untagged)
       .then((r) => !cancelled && setResults(r.results))
       .catch((e) => !cancelled && setError(String(e.message ?? e)))
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
     }
-  }, [query, selected])
+  }, [query, selected, untagged])
 
   const toggle = (id: string) =>
     setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -55,6 +56,16 @@ export default function Search() {
             </button>
           )}
         </div>
+        {/* The hand-tagger's queue: everything no one has touched yet. */}
+        <label className="mb-3 flex cursor-pointer items-center gap-2 text-xs font-medium">
+          <input
+            type="checkbox"
+            checked={untagged}
+            onChange={(e) => setUntagged(e.target.checked)}
+            className="accent-clay-900"
+          />
+          Untagged only
+        </label>
         {facets.map((facet) => (
           <FacetGroup key={facet.key} facet={facet} selected={selected} onToggle={toggle} />
         ))}
@@ -93,7 +104,7 @@ export default function Search() {
               />
               <div className="p-2">
                 <p className="truncate text-xs font-medium">
-                  {r.analysis?.product_name ?? r.analysis?.description ?? 'Untitled'}
+                  {r.analysis?.product_name ?? r.analysis?.description ?? r.filename ?? 'Untitled'}
                 </p>
                 <p className="truncate text-[11px] text-clay-600">
                   {[r.analysis?.product_code, r.analysis?.size_mm].filter(Boolean).join(' · ') ||

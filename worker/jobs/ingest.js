@@ -207,6 +207,24 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         if (error || !created)
             throw new Error(`asset insert: ${error?.message}`);
         assetId = created.id;
+        // A basic search row from what the email itself provides — filename,
+        // subject, thread text. This is what makes an image findable before any
+        // tagging has happened, manual or AI; both later rewrite this row with
+        // richer content.
+        if (!verdict.reject) {
+            const { data: ctx } = await sb
+                .from('messages')
+                .select('threads(subject, body_text)')
+                .eq('id', messageId)
+                .maybeSingle();
+            const thread = (ctx?.threads ?? null);
+            await sb.from('asset_search').upsert({
+                asset_id: assetId,
+                content: [part.filename, thread?.subject, (thread?.body_text ?? '').slice(0, 4000)]
+                    .filter(Boolean)
+                    .join('\n'),
+            }, { onConflict: 'asset_id' });
+        }
     }
     await sb.from('asset_occurrences').upsert({
         asset_id: assetId,

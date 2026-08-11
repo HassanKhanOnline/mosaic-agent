@@ -18,7 +18,7 @@ async function request(path, init = {}) {
 }
 export const api = {
     vocab: () => request('/vocab'),
-    search: (q, facets, page = 0) => request(`/search?q=${encodeURIComponent(q)}&facets=${facets.join(',')}&page=${page}`),
+    search: (q, facets, page = 0, untagged = false) => request(`/search?q=${encodeURIComponent(q)}&facets=${facets.join(',')}&page=${page}${untagged ? '&untagged=1' : ''}`),
     asset: (id) => request(`/assets/${id}`),
     addTag: (id, tagId) => request(`/assets/${id}/tags`, { method: 'POST', body: JSON.stringify({ tag_id: tagId }) }),
     removeTag: (id, tagId) => request(`/assets/${id}/tags/${tagId}`, { method: 'DELETE' }),

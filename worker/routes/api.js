@@ -56,16 +56,27 @@ api.get('/search', async (c) => {
     const sb = db(c.env);
     const q = (c.req.query('q') ?? '').trim();
     const facets = (c.req.query('facets') ?? '').split(',').filter(Boolean);
+    const untagged = c.req.query('untagged') === '1';
     const page = Math.max(0, Number(c.req.query('page') ?? 0));
     const limit = 48;
     let ids;
     if (q) {
+        // The semantic leg is optional: if the embedding model is unavailable the
+        // query degrades to lexical-only rather than failing the search outright.
+        let q_embedding = null;
+        try {
+            q_embedding = await embed(c.env, q);
+        }
+        catch {
+            q_embedding = null;
+        }
         const { data, error } = await sb.rpc('search_assets', {
             q,
-            q_embedding: await embed(c.env, q),
+            q_embedding,
             facets: facets.length ? facets : null,
             limit_n: limit,
             offset_n: page * limit,
+            untagged,
         });
         if (error)
             return c.json({ error: error.message }, 500);
@@ -76,6 +87,7 @@ api.get('/search', async (c) => {
             facets: facets.length ? facets : null,
             limit_n: limit,
             offset_n: page * limit,
+            untagged,
         });
         if (error)
             return c.json({ error: error.message }, 500);
@@ -118,6 +130,7 @@ api.post('/assets/:id/tags', async (c) => {
         .upsert({ asset_id: c.req.param('id'), tag_id, source: 'manual', created_by: c.get('userId') }, { onConflict: 'asset_id,tag_id,source' });
     if (error)
         return c.json({ error: error.message }, 400);
+    await rebuildSearchRow(c.env, c.req.param('id'));
     return c.json({ ok: true });
 });
 api.delete('/assets/:id/tags/:tagId', async (c) => {
@@ -127,8 +140,41 @@ api.delete('/assets/:id/tags/:tagId', async (c) => {
         .eq('asset_id', c.req.param('id'))
         .eq('tag_id', c.req.param('tagId'))
         .eq('source', 'manual');
+    await rebuildSearchRow(c.env, c.req.param('id'));
     return c.json({ ok: true });
 });
+// The search row is the union of everything known about the asset — manual
+// tags, AI analysis if it exists, and the email's own words. Rebuilt whole on
+// every tag change rather than patched, because "recompute from source" cannot
+// drift the way incremental edits do.
+async function rebuildSearchRow(env, assetId) {
+    const sb = db(env);
+    const [{ data: tags }, { data: analysis }, { data: occ }] = await Promise.all([
+        sb.from('asset_tags').select('tags(value)').eq('asset_id', assetId),
+        sb.from('asset_analysis').select('description, product_name, product_code, size_mm').eq('asset_id', assetId).maybeSingle(),
+        sb
+            .from('asset_occurrences')
+            .select('filename, messages(threads(subject, body_text))')
+            .eq('asset_id', assetId)
+            .limit(1)
+            .maybeSingle(),
+    ]);
+    const thread = occ?.messages
+        ?.threads;
+    const content = [
+        analysis?.description,
+        analysis?.product_name,
+        analysis?.product_code,
+        analysis?.size_mm,
+        (tags ?? []).map((t) => t.tags?.value).filter(Boolean).join(' '),
+        occ?.filename,
+        thread?.subject,
+        (thread?.body_text ?? '').slice(0, 4000),
+    ]
+        .filter(Boolean)
+        .join('\n');
+    await sb.from('asset_search').upsert({ asset_id: assetId, content }, { onConflict: 'asset_id' });
+}
 // Reversing a filter call — the reason every rejected asset keeps its bytes.
 api.post('/assets/:id/status', async (c) => {
     const { status } = await c.req.json();
@@ -229,18 +275,26 @@ async function hydrate(env, ids) {
     if (!ids.length)
         return [];
     const sb = db(env);
-    const [{ data: assets }, { data: analyses }] = await Promise.all([
-        sb.from('assets').select('id, sha256, thumb_key, width, height, occurrence_count, last_seen_at').in('id', ids),
+    const [{ data: assets }, { data: analyses }, { data: occurrences }] = await Promise.all([
+        sb.from('assets').select('id, sha256, thumb_key, width, height, occurrence_count, last_seen_at, status').in('id', ids),
         sb.from('asset_analysis').select('asset_id, description, product_name, product_code, size_mm').in('asset_id', ids),
+        // Filename is the only label an untagged image has; first occurrence wins.
+        sb.from('asset_occurrences').select('asset_id, filename').in('asset_id', ids),
     ]);
     const byId = new Map((assets ?? []).map((a) => [a.id, a]));
     const analysisById = new Map((analyses ?? []).map((a) => [a.asset_id, a]));
+    const filenameById = new Map();
+    for (const o of (occurrences ?? [])) {
+        if (o.filename && !filenameById.has(o.asset_id))
+            filenameById.set(o.asset_id, o.filename);
+    }
     return Promise.all(ids
         .map((id) => byId.get(id))
         .filter(Boolean)
         .map(async (asset) => ({
         ...asset,
         analysis: analysisById.get(asset.id) ?? null,
+        filename: filenameById.get(asset.id) ?? null,
         thumbUrl: await imageUrl(asset.sha256, asset.thumb_key ? 'thumb' : 'orig', env.TOKEN_KEY),
     })));
 }

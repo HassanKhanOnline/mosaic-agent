@@ -13,6 +13,8 @@ export interface SearchResult {
   height: number | null
   occurrence_count: number
   last_seen_at: string | null
+  status: string
+  filename: string | null
   thumbUrl: string
   analysis: {
     description: string | null
@@ -65,9 +67,11 @@ export const api = {
   vocab: () =>
     request<{ facets: { key: string; label: string; values: TagRef[] }[] }>('/vocab'),
 
-  search: (q: string, facets: string[], page = 0) =>
+  search: (q: string, facets: string[], page = 0, untagged = false) =>
     request<{ results: SearchResult[] }>(
-      `/search?q=${encodeURIComponent(q)}&facets=${facets.join(',')}&page=${page}`,
+      `/search?q=${encodeURIComponent(q)}&facets=${facets.join(',')}&page=${page}${
+        untagged ? '&untagged=1' : ''
+      }`,
     ),
 
   asset: (id: string) => request<AssetDetail>(`/assets/${id}`),
