@@ -167,12 +167,31 @@ api.get('/admin/status', async (c) => {
     sb.from('sync_runs').select('*').order('started_at', { ascending: false }).limit(1).maybeSingle(),
     countByStatus(sb),
   ])
+  // A missing table reads back as "no rows" rather than an error, so without
+  // this probe an unapplied schema looks exactly like an empty library — which
+  // is how you end up connecting a mailbox to a database that cannot store it.
+  const { error: schemaError } = await sb.from('tags').select('id').limit(1)
+
+  const missing = (
+    [
+      ['GOOGLE_CLIENT_ID', c.env.GOOGLE_CLIENT_ID],
+      ['GOOGLE_CLIENT_SECRET', c.env.GOOGLE_CLIENT_SECRET],
+      ['ANTHROPIC_API_KEY', c.env.ANTHROPIC_API_KEY],
+    ] as const
+  )
+    .filter(([, value]) => !value)
+    .map(([name]) => name)
+
   return c.json({
     mailbox: c.env.MAILBOX,
     account: account.data,
     run: run.data,
     counts,
-    configured: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.ANTHROPIC_API_KEY),
+    missing,
+    schemaReady: !schemaError,
+    // Connecting needs Google; tagging needs Anthropic. Reported separately so
+    // a missing Anthropic key does not block connecting the mailbox.
+    canConnect: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) && !schemaError,
   })
 })
 

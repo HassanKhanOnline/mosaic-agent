@@ -42,7 +42,7 @@ auth.get('/google/callback', async (c) => {
     }
     const profile = await gmail.getProfile(token.access_token);
     const sb = db(c.env);
-    await sb.from('gmail_accounts').upsert({
+    const { error: storeError } = await sb.from('gmail_accounts').upsert({
         email: profile.emailAddress,
         google_sub: profile.emailAddress,
         refresh_token: await seal(token.refresh_token, c.env.TOKEN_KEY),
@@ -52,6 +52,13 @@ auth.get('/google/callback', async (c) => {
         invalid_since: null,
         revoked_at: null,
     }, { onConflict: 'email' });
+    // Without this check the consent screen succeeds, Google is authorised, and
+    // the admin page says "connected" — while nothing was stored, because the
+    // table does not exist or a policy refused the write. The mailbox then looks
+    // connected and never syncs. Fail loudly instead.
+    if (storeError) {
+        return c.redirect(`${c.env.APP_URL}/admin?error=${encodeURIComponent(`could not store the connection: ${storeError.message}`)}`);
+    }
     return c.redirect(`${c.env.APP_URL}/admin?connected=${encodeURIComponent(profile.emailAddress)}`);
 });
 export function redirectUri(env) {

@@ -84,7 +84,9 @@ export const api = {
   status: () =>
     request<{
       mailbox: string
-      configured: boolean
+      missing: string[]
+      schemaReady: boolean
+      canConnect: boolean
       account: { email: string; connected_at: string; invalid_since: string | null } | null
       run: {
         kind: string

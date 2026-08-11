@@ -57,6 +57,14 @@ export default function Admin() {
       {params.get('error') && <Banner tone="bad">Google returned: {params.get('error')}</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
 
+      {!status.schemaReady && (
+        <Banner tone="bad">
+          The database schema has not been applied. Run <code>supabase/apply.sql</code> in
+          the Supabase SQL editor first — until then a mailbox can be authorised but
+          nothing can be stored, and this page will look empty rather than broken.
+        </Banner>
+      )}
+
       <section>
         <h2 className="text-sm font-semibold">Mailbox</h2>
         {status.account ? (
@@ -88,14 +96,16 @@ export default function Admin() {
               No mailbox connected. This will authorise read-only Gmail access for{' '}
               <span className="font-medium">{status.mailbox}</span>.
             </p>
-            {!status.configured && (
+            {status.missing.includes('GOOGLE_CLIENT_ID') && (
               <p className="mt-2 text-xs text-amber-800">
-                GOOGLE_CLIENT_ID or ANTHROPIC_API_KEY is not set — see .dev.vars.
+                Needs a Google OAuth client. Set it with{' '}
+                <code>npx wrangler secret put GOOGLE_CLIENT_ID</code> (and{' '}
+                <code>GOOGLE_CLIENT_SECRET</code>).
               </p>
             )}
             <button
               onClick={connect}
-              disabled={busy === 'connect' || !status.configured}
+              disabled={busy === 'connect' || !status.canConnect}
               className="mt-3 rounded bg-clay-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
             >
               Connect Gmail
