@@ -67,11 +67,47 @@ export async function ingestTick(env: Env): Promise<TickResult> {
   }
 
   try {
+    // Interrupted threads first. They can live on listing pages the cursor
+    // has already passed — the page walk will never see them again, but their
+    // Gmail ids are in our own table, so no listing is needed to redo them.
+    const healed = await healIncomplete(env, sb, token)
+    if (healed > 0) return { status: 'working', threads: healed }
+
     return await processPage(env, sb, run, token)
   } catch (err) {
     await fail(sb, run.id, String(err))
     return { status: 'error', message: String(err) }
   }
+}
+
+async function healIncomplete(env: Env, sb: SupabaseClient, token: string): Promise<number> {
+  const { data: incomplete } = await sb
+    .from('threads')
+    .select('gmail_thread_id')
+    .is('body_text', null)
+    .limit(THREADS_PER_TICK)
+  if (!incomplete?.length) return 0
+
+  let healed = 0
+  for (const row of incomplete) {
+    try {
+      await ingestThread(env, sb, token, row.gmail_thread_id)
+    } catch (err) {
+      // A thread deleted on Gmail since we first saw it 404s forever. Mark it
+      // complete-and-empty so it stops blocking the heal queue; anything else
+      // is a real failure and should surface.
+      if (String(err).includes('-> 404')) {
+        await sb
+          .from('threads')
+          .update({ body_text: '' })
+          .eq('gmail_thread_id', row.gmail_thread_id)
+      } else {
+        throw err
+      }
+    }
+    healed++
+  }
+  return healed
 }
 
 async function processPage(
