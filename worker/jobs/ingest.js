@@ -161,24 +161,7 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         .maybeSingle();
     let assetId;
     if (existing) {
-        const first = existing.first_seen_at && existing.first_seen_at < when ? existing.first_seen_at : when;
-        const last = existing.last_seen_at && existing.last_seen_at > when ? existing.last_seen_at : when;
-        const count = existing.occurrence_count + 1;
-        const boilerplate = isBoilerplate(count, first, last);
-        await sb
-            .from('assets')
-            .update({
-            occurrence_count: count,
-            first_seen_at: first,
-            last_seen_at: last,
-            // Suppression is reversible and only ever applied to an asset that has
-            // not already been rejected for another reason.
-            ...(boilerplate && existing.status !== 'rejected'
-                ? { status: 'suppressed', reject_reason: 'boilerplate' }
-                : {}),
-        })
-            .eq('id', existing.id);
-        assetId = existing.id;
+        return recordExisting(sb, existing, messageId, part, when);
     }
     else {
         const dims = dimensions(bytes);
@@ -204,6 +187,20 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         })
             .select('id')
             .single();
+        if (error?.code === '23505') {
+            // Unique violation on sha256: a concurrent tick inserted this image
+            // between our existence check and this insert. That tick owns the row;
+            // re-read it and take the update path like any other duplicate. The R2
+            // put above simply overwrote the same key with the same bytes.
+            const { data: winner } = await sb
+                .from('assets')
+                .select('id, occurrence_count, first_seen_at, last_seen_at, status')
+                .eq('sha256', sha)
+                .single();
+            if (!winner)
+                throw new Error('asset vanished after duplicate-key race');
+            return recordExisting(sb, winner, messageId, part, when);
+        }
         if (error || !created)
             throw new Error(`asset insert: ${error?.message}`);
         assetId = created.id;
@@ -232,7 +229,36 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         filename: part.filename,
         is_inline: part.isInline,
     }, { onConflict: 'asset_id,message_id' });
-    return !existing;
+    return true;
+}
+// The duplicate path: bump counters, apply the boilerplate check, record the
+// occurrence. Reached both by an ordinary re-send of a known image and by
+// losing an insert race to a concurrent tick.
+async function recordExisting(sb, existing, messageId, part, when) {
+    const first = existing.first_seen_at && existing.first_seen_at < when ? existing.first_seen_at : when;
+    const last = existing.last_seen_at && existing.last_seen_at > when ? existing.last_seen_at : when;
+    const count = existing.occurrence_count + 1;
+    const boilerplate = isBoilerplate(count, first, last);
+    await sb
+        .from('assets')
+        .update({
+        occurrence_count: count,
+        first_seen_at: first,
+        last_seen_at: last,
+        // Suppression is reversible and only ever applied to an asset that has
+        // not already been rejected for another reason.
+        ...(boilerplate && existing.status !== 'rejected'
+            ? { status: 'suppressed', reject_reason: 'boilerplate' }
+            : {}),
+    })
+        .eq('id', existing.id);
+    await sb.from('asset_occurrences').upsert({
+        asset_id: existing.id,
+        message_id: messageId,
+        filename: part.filename,
+        is_inline: part.isInline,
+    }, { onConflict: 'asset_id,message_id' });
+    return false;
 }
 async function fail(sb, runId, message) {
     await sb

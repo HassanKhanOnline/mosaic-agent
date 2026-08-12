@@ -19,7 +19,6 @@ export default function AssetPanel({ id, onClose }) {
     if (!detail)
         return null;
     const { asset, analysis, tags, occurrences } = detail;
-    const first = occurrences[0]?.messages;
     async function toggleTag(tag, has) {
         if (has)
             await api.removeTag(id, tag.id);
@@ -35,7 +34,18 @@ export default function AssetPanel({ id, onClose }) {
                                             // different from a guess — that is the whole feedback loop.
                                             t.source === 'manual'
                                                 ? 'bg-clay-900 text-white'
-                                                : 'bg-clay-100 text-clay-900'}`, children: t.tags?.value }, `${t.tag_id}-${t.source}`))), tags.length === 0 && _jsx("span", { className: "text-xs text-clay-600", children: "Not tagged yet." })] }))] }), first && (_jsxs("section", { children: [_jsx("h3", { className: "mb-1 text-xs font-medium uppercase tracking-wide text-clay-600", children: "From the email" }), _jsxs("p", { className: "text-xs text-clay-600", children: [first.from_addr, " \u00B7 ", first.sent_at && new Date(first.sent_at).toLocaleDateString()] }), _jsx("p", { className: "mt-1 text-sm font-medium", children: first.threads?.subject }), _jsx("p", { className: "mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-clay-50 p-3 text-xs", children: first.threads?.body_text?.slice(0, 3000) })] })), occurrences.length > 1 && (_jsxs("p", { className: "text-xs text-clay-600", children: ["Also attached to ", occurrences.length - 1, " other message", occurrences.length === 2 ? '' : 's', "."] }))] })] }) }));
+                                                : 'bg-clay-100 text-clay-900'}`, children: t.tags?.value }, `${t.tag_id}-${t.source}`))), tags.length === 0 && _jsx("span", { className: "text-xs text-clay-600", children: "Not tagged yet." })] }))] }), occurrences.length > 0 && (_jsxs("section", { children: [_jsx("h3", { className: "mb-2 text-xs font-medium uppercase tracking-wide text-clay-600", children: occurrences.length === 1
+                                        ? 'From the email'
+                                        : `Attached to ${occurrences.length} messages` }), _jsx("div", { className: "space-y-2", children: occurrences.map((o, i) => {
+                                        const msg = o.messages;
+                                        if (!msg)
+                                            return null;
+                                        return (
+                                        // The first email is open because it usually names the
+                                        // product; the rest are one click away, each with its own
+                                        // thread text — often a different customer conversation.
+                                        _jsxs("details", { open: i === 0, className: "rounded border border-clay-200", children: [_jsxs("summary", { className: "cursor-pointer list-none px-3 py-2", children: [_jsx("span", { className: "block truncate text-sm font-medium", children: msg.threads?.subject ?? '(no subject)' }), _jsxs("span", { className: "block truncate text-xs text-clay-600", children: [msg.from_addr, msg.to_addrs?.length > 0 && _jsxs(_Fragment, { children: [" \u2192 ", msg.to_addrs.join(', ')] }), msg.sent_at && _jsxs(_Fragment, { children: [" \u00B7 ", new Date(msg.sent_at).toLocaleDateString()] })] })] }), _jsx("p", { className: "max-h-48 overflow-y-auto whitespace-pre-wrap border-t border-clay-200 bg-clay-50 p-3 text-xs", children: msg.threads?.body_text?.slice(0, 3000) || '(no text in this thread)' })] }, i));
+                                    }) })] }))] })] }) }));
 }
 function Row({ label, value }) {
     if (!value)

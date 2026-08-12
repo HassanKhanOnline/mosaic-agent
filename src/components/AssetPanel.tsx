@@ -22,7 +22,6 @@ export default function AssetPanel({ id, onClose }: { id: string; onClose: () =>
   if (!detail) return null
 
   const { asset, analysis, tags, occurrences } = detail
-  const first = occurrences[0]?.messages
 
   async function toggleTag(tag: TagRef, has: boolean) {
     if (has) await api.removeTag(id, tag.id)
@@ -122,26 +121,44 @@ export default function AssetPanel({ id, onClose }: { id: string; onClose: () =>
             )}
           </section>
 
-          {first && (
+          {occurrences.length > 0 && (
             <section>
-              <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-clay-600">
-                From the email
+              <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-clay-600">
+                {occurrences.length === 1
+                  ? 'From the email'
+                  : `Attached to ${occurrences.length} messages`}
               </h3>
-              <p className="text-xs text-clay-600">
-                {first.from_addr} · {first.sent_at && new Date(first.sent_at).toLocaleDateString()}
-              </p>
-              <p className="mt-1 text-sm font-medium">{first.threads?.subject}</p>
-              <p className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-clay-50 p-3 text-xs">
-                {first.threads?.body_text?.slice(0, 3000)}
-              </p>
+              <div className="space-y-2">
+                {occurrences.map((o, i) => {
+                  const msg = o.messages
+                  if (!msg) return null
+                  return (
+                    // The first email is open because it usually names the
+                    // product; the rest are one click away, each with its own
+                    // thread text — often a different customer conversation.
+                    <details
+                      key={i}
+                      open={i === 0}
+                      className="rounded border border-clay-200"
+                    >
+                      <summary className="cursor-pointer list-none px-3 py-2">
+                        <span className="block truncate text-sm font-medium">
+                          {msg.threads?.subject ?? '(no subject)'}
+                        </span>
+                        <span className="block truncate text-xs text-clay-600">
+                          {msg.from_addr}
+                          {msg.to_addrs?.length > 0 && <> → {msg.to_addrs.join(', ')}</>}
+                          {msg.sent_at && <> · {new Date(msg.sent_at).toLocaleDateString()}</>}
+                        </span>
+                      </summary>
+                      <p className="max-h-48 overflow-y-auto whitespace-pre-wrap border-t border-clay-200 bg-clay-50 p-3 text-xs">
+                        {msg.threads?.body_text?.slice(0, 3000) || '(no text in this thread)'}
+                      </p>
+                    </details>
+                  )
+                })}
+              </div>
             </section>
-          )}
-
-          {occurrences.length > 1 && (
-            <p className="text-xs text-clay-600">
-              Also attached to {occurrences.length - 1} other message
-              {occurrences.length === 2 ? '' : 's'}.
-            </p>
           )}
         </div>
       </div>
