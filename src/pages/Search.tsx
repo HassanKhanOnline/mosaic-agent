@@ -14,6 +14,12 @@ export default function Search() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<string | null>(null)
+  // Pages already loaded; page N+1 appends. exhausted flips when a page comes
+  // back short, which is the only end-of-results signal the API gives.
+  const [page, setPage] = useState(0)
+  const [exhausted, setExhausted] = useState(false)
+
+  const PAGE_SIZE = 48
 
   useEffect(() => {
     api.vocab().then((v) => setFacets(v.facets)).catch(() => {})
@@ -30,15 +36,40 @@ export default function Search() {
     let cancelled = false
     setLoading(true)
     setError(null)
+    setPage(0)
     api
       .search(query, selected, 0, untagged)
-      .then((r) => !cancelled && setResults(r.results))
+      .then((r) => {
+        if (cancelled) return
+        setResults(r.results)
+        setExhausted(r.results.length < PAGE_SIZE)
+      })
       .catch((e) => !cancelled && setError(String(e.message ?? e)))
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
     }
   }, [query, selected, untagged])
+
+  async function loadMore() {
+    const next = page + 1
+    setLoading(true)
+    try {
+      const r = await api.search(query, selected, next, untagged)
+      // Appends can duplicate an asset if the underlying set shifted between
+      // pages (the backfill inserts continuously); dedupe by id keeps React
+      // keys unique and the grid honest.
+      setResults((prev) => {
+        const seen = new Set(prev.map((x) => x.id))
+        return [...prev, ...r.results.filter((x) => !seen.has(x.id))]
+      })
+      setExhausted(r.results.length < PAGE_SIZE)
+      setPage(next)
+    } catch (e) {
+      setError(String((e as Error).message ?? e))
+    }
+    setLoading(false)
+  }
 
   const toggle = (id: string) =>
     setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -85,7 +116,7 @@ export default function Search() {
           ) : loading ? (
             'Searching…'
           ) : (
-            `${results.length} image${results.length === 1 ? '' : 's'}`
+            `${results.length}${exhausted ? '' : '+'} image${results.length === 1 ? '' : 's'}`
           )}
         </p>
 
@@ -119,6 +150,18 @@ export default function Search() {
           <p className="mt-10 text-center text-sm text-clay-600">
             Nothing matches. Try fewer filters, or describe the look rather than the name.
           </p>
+        )}
+
+        {!exhausted && results.length > 0 && (
+          <div className="mt-6 flex justify-center">
+            <button
+              onClick={loadMore}
+              disabled={loading}
+              className="rounded border border-clay-200 bg-white px-4 py-2 text-sm hover:bg-clay-100 disabled:opacity-50"
+            >
+              {loading ? 'Loading…' : 'Load more'}
+            </button>
+          </div>
         )}
       </section>
 
