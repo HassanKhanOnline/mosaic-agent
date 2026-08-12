@@ -18,6 +18,13 @@ export default function Search() {
   // back short, which is the only end-of-results signal the API gives.
   const [page, setPage] = useState(0)
   const [exhausted, setExhausted] = useState(false)
+  // Bulk tagging. In select mode a card click toggles membership instead of
+  // opening the detail panel.
+  const [selectMode, setSelectMode] = useState(false)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [pickedTags, setPickedTags] = useState<string[]>([])
+  const [applying, setApplying] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const PAGE_SIZE = 48
 
@@ -74,6 +81,43 @@ export default function Search() {
   const toggle = (id: string) =>
     setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
 
+  const togglePicked = (id: string) =>
+    setPicked((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  function exitSelectMode() {
+    setSelectMode(false)
+    setPicked(new Set())
+    setPickedTags([])
+  }
+
+  async function applyBulk() {
+    if (!picked.size || !pickedTags.length) return
+    setApplying(true)
+    setError(null)
+    try {
+      const r = await api.bulkTag([...picked], pickedTags)
+      setNotice(`Tagged ${r.tagged} image${r.tagged === 1 ? '' : 's'}.`)
+      setTimeout(() => setNotice(null), 4000)
+      exitSelectMode()
+      // With the untagged queue on, freshly tagged images should fall out of
+      // the list; a refetch is the simplest honest way to show that.
+      if (untagged) {
+        const refreshed = await api.search(query, selected, 0, untagged)
+        setResults(refreshed.results)
+        setExhausted(refreshed.results.length < PAGE_SIZE)
+        setPage(0)
+      }
+    } catch (e) {
+      setError(String((e as Error).message ?? e))
+    }
+    setApplying(false)
+  }
+
   const selectedCount = selected.length
 
   return (
@@ -113,20 +157,51 @@ export default function Search() {
         <p className="mt-2 h-4 text-xs text-clay-600">
           {error ? (
             <span className="text-red-700">{error}</span>
+          ) : notice ? (
+            <span className="text-green-800">{notice}</span>
           ) : loading ? (
             'Searching…'
           ) : (
             `${results.length}${exhausted ? '' : '+'} image${results.length === 1 ? '' : 's'}`
           )}
+          <span className="float-right flex gap-3">
+            {selectMode && picked.size < results.length && (
+              <button
+                onClick={() => setPicked(new Set(results.map((r) => r.id)))}
+                className="underline"
+              >
+                Select all {results.length}
+              </button>
+            )}
+            <button
+              onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className="underline"
+            >
+              {selectMode ? 'Done selecting' : 'Select'}
+            </button>
+          </span>
         </p>
 
         <div className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
           {results.map((r) => (
             <button
               key={r.id}
-              onClick={() => setOpen(r.id)}
-              className="group overflow-hidden rounded border border-clay-200 bg-white text-left"
+              onClick={() => (selectMode ? togglePicked(r.id) : setOpen(r.id))}
+              className={`group relative overflow-hidden rounded border bg-white text-left ${
+                picked.has(r.id) ? 'border-clay-900 ring-2 ring-clay-900' : 'border-clay-200'
+              }`}
             >
+              {selectMode && (
+                <span
+                  className={`absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded-full border text-xs ${
+                    picked.has(r.id)
+                      ? 'border-clay-900 bg-clay-900 text-white'
+                      : 'border-clay-600 bg-white/90'
+                  }`}
+                >
+                  {picked.has(r.id) ? '✓' : ''}
+                </span>
+              )}
               <img
                 src={r.thumbUrl}
                 alt={r.analysis?.description ?? ''}
@@ -166,6 +241,55 @@ export default function Search() {
       </section>
 
       {open && <AssetPanel id={open} onClose={() => setOpen(null)} />}
+
+      {selectMode && (
+        <div className="fixed inset-x-0 bottom-0 z-10 border-t border-clay-200 bg-white p-4 shadow-lg">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-start gap-4">
+            <p className="pt-1 text-sm font-medium whitespace-nowrap">
+              {picked.size} selected
+            </p>
+            <div className="min-w-0 flex-1 space-y-1.5">
+              {facets.map((facet) => (
+                <div key={facet.key} className="flex flex-wrap items-baseline gap-1">
+                  <span className="w-14 shrink-0 text-[11px] text-clay-600">{facet.label}</span>
+                  {facet.values.map((v) => {
+                    const on = pickedTags.includes(v.id)
+                    return (
+                      <button
+                        key={v.id}
+                        onClick={() =>
+                          setPickedTags((t) =>
+                            on ? t.filter((x) => x !== v.id) : [...t, v.id],
+                          )
+                        }
+                        className={`rounded-full px-2 py-0.5 text-xs ${
+                          on ? 'bg-clay-900 text-white' : 'bg-clay-100 hover:bg-clay-200'
+                        }`}
+                      >
+                        {v.value}
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                onClick={applyBulk}
+                disabled={applying || !picked.size || !pickedTags.length}
+                className="rounded bg-clay-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+              >
+                {applying
+                  ? 'Tagging…'
+                  : `Tag ${picked.size || '…'} with ${pickedTags.length || '…'}`}
+              </button>
+              <button onClick={exitSelectMode} className="text-xs text-clay-600 underline">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

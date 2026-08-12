@@ -82,6 +82,12 @@ export const api = {
   removeTag: (id: string, tagId: string) =>
     request(`/assets/${id}/tags/${tagId}`, { method: 'DELETE' }),
 
+  bulkTag: (assetIds: string[], tagIds: string[]) =>
+    request<{ ok: true; tagged: number }>(`/assets/tags/bulk`, {
+      method: 'POST',
+      body: JSON.stringify({ asset_ids: assetIds, tag_ids: tagIds }),
+    }),
+
   setStatus: (id: string, status: string) =>
     request(`/assets/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
 
