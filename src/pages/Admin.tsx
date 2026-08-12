@@ -137,8 +137,16 @@ export default function Admin() {
                 <span className="font-medium capitalize">{run.kind}</span> — {run.status}
               </p>
               <p className="mt-1 text-xs text-clay-600">
-                {run.threads_seen} threads, {run.images_stored} new images · started{' '}
-                {new Date(run.started_at).toLocaleString()}
+                {/* Library totals, not the run's own counters — those drift
+                    low when ticks overlap and read stale values. */}
+                {(counts.threads ?? 0).toLocaleString()} threads ·{' '}
+                {(
+                  (counts.pending ?? 0) +
+                  (counts.ready ?? 0) +
+                  (counts.rejected ?? 0) +
+                  (counts.suppressed ?? 0)
+                ).toLocaleString()}{' '}
+                images · started {new Date(run.started_at).toLocaleString()}
               </p>
               {run.error && <p className="mt-2 text-xs text-red-700">{run.error}</p>}
             </>

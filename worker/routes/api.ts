@@ -296,7 +296,14 @@ async function countByStatus(sb: ReturnType<typeof db>) {
       return [status, count ?? 0] as const
     }),
   )
-  return Object.fromEntries(entries) as Record<(typeof statuses)[number], number>
+  // Threads counted from the table, not from sync_runs — the run counters are
+  // read-modify-write and lose updates when ticks overlap, so they drift low.
+  // Table counts are the truth the library actually holds.
+  const { count: threads } = await sb.from('threads').select('id', { count: 'exact', head: true })
+  return {
+    ...(Object.fromEntries(entries) as Record<(typeof statuses)[number], number>),
+    threads: threads ?? 0,
+  }
 }
 
 // Search returns ids in rank order; this refills them with what the grid needs

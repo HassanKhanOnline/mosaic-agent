@@ -4,9 +4,10 @@ import * as gmail from '../lib/gmail';
 import { classify, dimensions, isBoilerplate, store } from '../lib/images';
 // Sized so one cron tick finishes comfortably inside a Worker's budget. Threads
 // vary wildly — a single thread can carry thirty photos — so the attachment cap
-// is the real limit and the thread count is deliberately conservative.
-const THREADS_PER_TICK = 8;
-const MAX_ATTACHMENTS_PER_TICK = 60;
+// is the real limit and the thread count is deliberately conservative. At 16
+// threads/minute the 3-year window (~20k threads) backfills in under a day.
+const THREADS_PER_TICK = 16;
+const MAX_ATTACHMENTS_PER_TICK = 100;
 export async function ingestTick(env) {
     const sb = db(env);
     const { data: run } = await sb
