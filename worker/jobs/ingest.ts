@@ -5,12 +5,15 @@ import { sha256Hex } from '../lib/crypto'
 import * as gmail from '../lib/gmail'
 import { classify, dimensions, isBoilerplate, store } from '../lib/images'
 
-// Sized so one cron tick finishes comfortably inside a Worker's budget. Threads
-// vary wildly — a single thread can carry thirty photos — so the attachment cap
-// is the real limit and the thread count is deliberately conservative. At 16
-// threads/minute the 3-year window (~20k threads) backfills in under a day.
-const THREADS_PER_TICK = 16
-const MAX_ATTACHMENTS_PER_TICK = 100
+// Sized against the Workers FREE plan's hard ceiling of 50 subrequests per
+// invocation — every Gmail call, Supabase write and R2 put counts, and a
+// thread costs ~8 on average. 16/tick was measured to die mid-batch every
+// single minute ("Too many subrequests"). 5 threads and 30 attachments keeps
+// a tick under the ceiling with headroom for a photo-heavy thread. On the
+// paid plan (1000 subrequests) this can go to 20+/tick; raise it there, not
+// here, after upgrading.
+const THREADS_PER_TICK = 5
+const MAX_ATTACHMENTS_PER_TICK = 30
 
 export interface TickResult {
   status: 'idle' | 'working' | 'done' | 'reconnect' | 'error'
@@ -82,10 +85,13 @@ async function processPage(
 
   // Already-ingested threads are the resume mechanism: the page is re-listed
   // each tick and shrinks as its threads land, so a crash mid-page costs only
-  // the threads that were in flight.
+  // the threads that were in flight. Only COMPLETED threads count — body_text
+  // is set as the last step of ingestThread, so a null there means the thread
+  // died mid-ingest and must be done again.
   const { data: known } = await sb
     .from('threads')
     .select('gmail_thread_id')
+    .not('body_text', 'is', null)
     .in('gmail_thread_id', ids.length ? ids : ['-'])
   const seen = new Set((known ?? []).map((r: { gmail_thread_id: string }) => r.gmail_thread_id))
   const todo = ids.filter((id) => !seen.has(id))
@@ -140,6 +146,12 @@ export async function ingestThread(
   const dates = metas.map((m) => m.sentAt).filter(Boolean) as string[]
   const participants = [...new Set(metas.flatMap((m) => [m.from, ...m.to].filter(Boolean)))]
 
+  // Two-phase write: the row goes in with body_text NULL (messages need the
+  // foreign key), and body_text is set only after every message and image has
+  // landed. body_text doubles as the completion marker — the skip-check in
+  // processPage only trusts threads where it is non-null, so a tick that dies
+  // mid-thread (the free plan's subrequest ceiling guarantees some will) gets
+  // that thread re-ingested next tick instead of silently losing its images.
   const { data: threadRow, error: threadErr } = await sb
     .from('threads')
     .upsert(
@@ -149,7 +161,7 @@ export async function ingestThread(
         participants,
         first_date: dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : null,
         last_date: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : null,
-        body_text: bodies.filter(Boolean).join('\n\n---\n\n').slice(0, 200_000),
+        body_text: null,
         fetched_at: new Date().toISOString(),
       },
       { onConflict: 'gmail_thread_id' },
@@ -186,6 +198,14 @@ export async function ingestThread(
       if (await recordAttachment(env, sb, messageRow.id, part, bytes, metas[i].sentAt)) stored++
     }
   }
+
+  // Completion marker — only now does the skip-check treat this thread as done.
+  const { error: doneErr } = await sb
+    .from('threads')
+    .update({ body_text: bodies.filter(Boolean).join('\n\n---\n\n').slice(0, 200_000) || '' })
+    .eq('id', threadRow.id)
+  if (doneErr) throw new Error(`thread completion: ${doneErr.message}`)
+
   return stored
 }
 
