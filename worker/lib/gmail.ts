@@ -4,9 +4,15 @@ import { open } from './crypto'
 const API = 'https://gmail.googleapis.com/gmail/v1/users/me'
 const TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
-// Only threads that carry an attachment, and nothing from spam or trash. This
-// is the whole privacy story: we never page the rest of the mailbox.
-export const QUERY = 'has:attachment -in:spam -in:trash'
+// Only threads that carry an IMAGE attachment, and nothing from spam or trash.
+// filename: matching is what keeps this tractable — measured on the real
+// mailbox, has:attachment alone matches 206k threads (every PDF invoice ever)
+// while the image filter matches 41k, and the 3-year window 20k. Widening the
+// window later is a one-line change here followed by a fresh backfill run;
+// already-ingested threads are skipped, so a re-run only pays for listing.
+export const QUERY =
+  '(filename:jpg OR filename:jpeg OR filename:png OR filename:webp OR filename:heic)' +
+  ' newer_than:3y -in:spam -in:trash'
 
 export class GmailAuthError extends Error {}
 
