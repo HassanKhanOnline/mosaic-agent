@@ -5,15 +5,19 @@ import { sha256Hex } from '../lib/crypto'
 import * as gmail from '../lib/gmail'
 import { classify, dimensions, isBoilerplate, store } from '../lib/images'
 
-// Sized against the Workers FREE plan's hard ceiling of 50 subrequests per
-// invocation — every Gmail call, Supabase write and R2 put counts. A stored
-// image alone costs ~6-7 (download, dedupe check, insert, R2 put, thumbnail,
-// occurrence, search row), which caps a tick at ~6 images regardless of how
-// many threads it touches; the budget in ingestThread enforces that and lets
-// an over-budget thread resume next tick instead of dying. On the paid plan
-// (1000 subrequests) raise both numbers ~10x.
-const THREADS_PER_TICK = 5
-const MAX_ATTACHMENTS_PER_TICK = 6
+// Sized for the Workers PAID plan: 1000 subrequests per invocation. A stored
+// image costs ~6-7 (download, dedupe check, insert, R2 put, thumbnail,
+// occurrence, search row) and a thread ~3 of overhead, so 40 threads + 60
+// images ≈ 550 subrequests — comfortable headroom. The binding constraint is
+// now wall-clock: keep a tick's sequential downloads under the minute so
+// ticks don't pile up on each other. The budget in ingestThread still lets an
+// over-budget monster thread pause and resume next tick.
+//
+// If the account ever drops back to the free plan, these must return to
+// 5 / 6 — the free ceiling is 50 subrequests, and 16/tick was measured to
+// die mid-batch every single minute there.
+const THREADS_PER_TICK = 40
+const MAX_ATTACHMENTS_PER_TICK = 60
 
 export interface TickResult {
   status: 'idle' | 'working' | 'done' | 'reconnect' | 'error'
