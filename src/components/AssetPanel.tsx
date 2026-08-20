@@ -1,17 +1,29 @@
 import { useEffect, useState } from 'react'
-import { api, type AssetDetail, type TagRef } from '../lib/api'
+import { api, type AssetDetail, type SearchResult, type TagRef } from '../lib/api'
 import { FACETS } from '../../shared/vocab'
 
 export default function AssetPanel({ id, onClose }: { id: string; onClose: () => void }) {
+  // The panel can navigate itself (clicking a similar tile), so the shown
+  // asset is state seeded from the prop rather than the prop directly.
+  const [currentId, setCurrentId] = useState(id)
   const [detail, setDetail] = useState<AssetDetail | null>(null)
+  const [similar, setSimilar] = useState<(SearchResult & { distance: number | null })[]>([])
   const [vocab, setVocab] = useState<{ key: string; label: string; values: TagRef[] }[]>([])
   const [editing, setEditing] = useState(false)
 
-  const load = () => api.asset(id).then(setDetail)
+  useEffect(() => setCurrentId(id), [id])
+
+  const load = () => api.asset(currentId).then(setDetail)
   useEffect(() => {
+    setDetail(null)
+    setSimilar([])
     load()
+    api
+      .similar(currentId)
+      .then((r) => setSimilar(r.results))
+      .catch(() => setSimilar([]))
     api.vocab().then((v) => setVocab(v.facets))
-  }, [id])
+  }, [currentId])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -24,8 +36,8 @@ export default function AssetPanel({ id, onClose }: { id: string; onClose: () =>
   const { asset, analysis, tags, occurrences } = detail
 
   async function toggleTag(tag: TagRef, has: boolean) {
-    if (has) await api.removeTag(id, tag.id)
-    else await api.addTag(id, tag.id)
+    if (has) await api.removeTag(currentId, tag.id)
+    else await api.addTag(currentId, tag.id)
     await load()
   }
 
@@ -158,6 +170,35 @@ export default function AssetPanel({ id, onClose }: { id: string; onClose: () =>
                   )
                 })}
               </div>
+            </section>
+          )}
+
+          {similar.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-clay-600">
+                Similar tiles
+              </h3>
+              <div className="grid grid-cols-6 gap-2">
+                {similar.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setCurrentId(s.id)}
+                    title={s.analysis?.product_name ?? s.filename ?? ''}
+                    className="overflow-hidden rounded border border-clay-200 hover:ring-2 hover:ring-clay-900"
+                  >
+                    <img
+                      src={s.thumbUrl}
+                      alt=""
+                      loading="lazy"
+                      className="aspect-square w-full bg-clay-100 object-cover"
+                    />
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-clay-600">
+                Matched by look — colour and texture — not by name, so re-sends of the
+                same photo from different emails group here too.
+              </p>
             </section>
           )}
         </div>

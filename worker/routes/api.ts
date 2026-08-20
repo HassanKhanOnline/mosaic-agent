@@ -138,6 +138,25 @@ api.get('/assets/:id', async (c) => {
   })
 })
 
+// Visually similar images, by cosine distance over the colour/texture
+// fingerprint. Works for every stored image, no AI involved — and it is the
+// answer to near-duplicates: the same photo re-encoded by Gmail hashes
+// differently and stays a separate asset, but lands at distance ~0 here.
+api.get('/assets/:id/similar', async (c) => {
+  const sb = db(c.env)
+  const { data, error } = await sb.rpc('similar_assets', {
+    source: c.req.param('id'),
+    limit_n: 18,
+  })
+  if (error) return c.json({ error: error.message }, 500)
+  const rows = (data ?? []) as { asset_id: string; distance: number }[]
+  const hydrated = await hydrate(c.env, rows.map((r) => r.asset_id))
+  const distanceById = new Map(rows.map((r) => [r.asset_id, r.distance]))
+  return c.json({
+    results: hydrated.map((h: any) => ({ ...h, distance: distanceById.get(h.id) ?? null })),
+  })
+})
+
 api.post('/assets/:id/tags', async (c) => {
   const { tag_id } = await c.req.json<{ tag_id: string }>()
   const { error } = await db(c.env)

@@ -320,6 +320,20 @@ async function recordAttachment(
     // Rejected images are still stored. A wrong threshold should be a setting
     // to change and re-run, not a photo we threw away.
     const { key, thumb } = await store(env, sha, bytes, part.mimeType)
+
+    // Visual fingerprint for "similar images". Failure-tolerant: a format the
+    // pipeline can't fingerprint just leaves the column null and the visual
+    // backfill tick retries it later.
+    let visual: string | null = null
+    try {
+      const { visualFingerprint, toVectorLiteral } = await import('../lib/visual')
+      visual = toVectorLiteral(
+        await visualFingerprint(env, new Response(bytes as BufferSource).body as ReadableStream),
+      )
+    } catch {
+      visual = null
+    }
+
     const { data: created, error } = await sb
       .from('assets')
       .insert({
@@ -335,6 +349,7 @@ async function recordAttachment(
         occurrence_count: 1,
         first_seen_at: when,
         last_seen_at: when,
+        visual,
       })
       .select('id')
       .single()

@@ -22,6 +22,7 @@ export const api = {
     asset: (id) => request(`/assets/${id}`),
     addTag: (id, tagId) => request(`/assets/${id}/tags`, { method: 'POST', body: JSON.stringify({ tag_id: tagId }) }),
     removeTag: (id, tagId) => request(`/assets/${id}/tags/${tagId}`, { method: 'DELETE' }),
+    similar: (id) => request(`/assets/${id}/similar`),
     bulkTag: (assetIds, tagIds) => request(`/assets/tags/bulk`, {
         method: 'POST',
         body: JSON.stringify({ asset_ids: assetIds, tag_ids: tagIds }),

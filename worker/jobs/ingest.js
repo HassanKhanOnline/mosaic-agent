@@ -2,17 +2,37 @@ import { db } from '../lib/db';
 import { sha256Hex } from '../lib/crypto';
 import * as gmail from '../lib/gmail';
 import { classify, dimensions, isBoilerplate, store } from '../lib/images';
-// Sized against the Workers FREE plan's hard ceiling of 50 subrequests per
-// invocation — every Gmail call, Supabase write and R2 put counts, and a
-// thread costs ~8 on average. 16/tick was measured to die mid-batch every
-// single minute ("Too many subrequests"). 5 threads and 30 attachments keeps
-// a tick under the ceiling with headroom for a photo-heavy thread. On the
-// paid plan (1000 subrequests) this can go to 20+/tick; raise it there, not
-// here, after upgrading.
-const THREADS_PER_TICK = 5;
-const MAX_ATTACHMENTS_PER_TICK = 30;
+// Sized for the Workers PAID plan: 1000 subrequests per invocation. A stored
+// image costs ~6-7 (download, dedupe check, insert, R2 put, thumbnail,
+// occurrence, search row) and a thread ~3 of overhead, so 40 threads + 60
+// images ≈ 550 subrequests — comfortable headroom. The binding constraint is
+// now wall-clock: keep a tick's sequential downloads under the minute so
+// ticks don't pile up on each other. The budget in ingestThread still lets an
+// over-budget monster thread pause and resume next tick.
+//
+// If the account ever drops back to the free plan, these must return to
+// 5 / 6 — the free ceiling is 50 subrequests, and 16/tick was measured to
+// die mid-batch every single minute there.
+const THREADS_PER_TICK = 40;
+const MAX_ATTACHMENTS_PER_TICK = 60;
+// The tick is split into two independent jobs, and the split is the whole
+// design. LISTING is cheap and must never repeat a page: claim the current
+// page by writing stub thread rows and advancing the cursor immediately.
+// INGESTING is expensive and resumable: the heal loop drains stub and
+// interrupted threads under the download budget, in random order, surviving
+// any mid-thread death. The old shape — ingest inline, advance cursor at the
+// end — meant a slow tick and the next cron overlapped on the SAME page and
+// spent the minute duplicating each other's work.
 export async function ingestTick(env) {
     const sb = db(env);
+    const { data: account } = await sb
+        .from('gmail_accounts')
+        .select('*')
+        .is('revoked_at', null)
+        .limit(1)
+        .maybeSingle();
+    if (!account)
+        return { status: 'idle' };
     const { data: run } = await sb
         .from('sync_runs')
         .select('*')
@@ -20,25 +40,19 @@ export async function ingestTick(env) {
         .order('started_at', { ascending: false })
         .limit(1)
         .maybeSingle();
-    if (!run)
+    // Anything left to do at all?
+    const { count: stubCount } = await sb
+        .from('threads')
+        .select('id', { count: 'exact', head: true })
+        .is('body_text', null);
+    if (!run && !stubCount)
         return { status: 'idle' };
-    const { data: account } = await sb
-        .from('gmail_accounts')
-        .select('*')
-        .eq('id', run.account_id)
-        .single();
-    if (!account) {
-        await fail(sb, run.id, 'account row missing');
-        return { status: 'error', message: 'account row missing' };
-    }
     let token;
     try {
         token = await gmail.accessToken(env, account.refresh_token);
     }
     catch (err) {
         if (err instanceof gmail.GmailAuthError) {
-            // Not a failure of this run so much as of the connection. Leave the run
-            // alive so it resumes from its checkpoint the moment someone reconnects.
             await sb
                 .from('gmail_accounts')
                 .update({ invalid_since: new Date().toISOString() })
@@ -51,98 +65,96 @@ export async function ingestTick(env) {
         await sb.from('gmail_accounts').update({ invalid_since: null }).eq('id', account.id);
     }
     try {
-        // Interrupted threads first. They can live on listing pages the cursor
-        // has already passed — the page walk will never see them again, but their
-        // Gmail ids are in our own table, so no listing is needed to redo them.
+        // Claim first: 3-4 subrequests, never blocked by ingestion.
+        if (run)
+            await claimPage(sb, run, token, stubCount ?? 0);
+        // Then ingest under the budget for the rest of the tick.
         const healed = await healIncomplete(env, sb, token);
-        if (healed > 0)
-            return { status: 'working', threads: healed };
-        return await processPage(env, sb, run, token);
+        return { status: 'working', threads: healed, message: `queue ${stubCount ?? 0}` };
     }
     catch (err) {
-        await fail(sb, run.id, String(err));
+        if (run)
+            await fail(sb, run.id, String(err));
         return { status: 'error', message: String(err) };
     }
 }
+// Lists ONE page, writes stub rows for unseen threads (body_text null, which
+// marks them for the heal loop), advances the cursor. The run is only marked
+// done when the listing is exhausted AND the queue has drained.
+async function claimPage(sb, run, token, queueDepth) {
+    // Don't let the unprocessed backlog grow without bound if listing outpaces
+    // ingestion for hours — pause claiming until the queue comes back down.
+    if (queueDepth > 2000)
+        return;
+    const page = await gmail.listThreads(token, run.page_token);
+    const ids = (page.threads ?? []).map((t) => t.id);
+    if (ids.length) {
+        // ignoreDuplicates so completed threads keep their body_text; only truly
+        // new ids get stub rows.
+        await sb.from('threads').upsert(ids.map((id) => ({ gmail_thread_id: id, body_text: null })), { onConflict: 'gmail_thread_id', ignoreDuplicates: true });
+    }
+    if (page.nextPageToken) {
+        await sb
+            .from('sync_runs')
+            .update({ page_token: page.nextPageToken, threads_seen: run.threads_seen + ids.length })
+            .eq('id', run.id);
+        return;
+    }
+    // Listing exhausted (the final page has threads but no next token). The run
+    // is marked done once the pre-claim queue was empty; any stubs this very
+    // tick created still drain afterwards — ingestTick heals run-less too.
+    if (queueDepth === 0) {
+        await sb
+            .from('sync_runs')
+            .update({ status: 'done', finished_at: new Date().toISOString(), page_token: null })
+            .eq('id', run.id);
+    }
+}
 async function healIncomplete(env, sb, token) {
+    // Over-fetch and shuffle: with a stable ordering, one thread that fails
+    // every time pins the same batch forever and the queue stops moving — which
+    // is exactly what happened (5 healed in an hour). Randomising the pick
+    // means a poison thread costs one slot per tick, not the whole queue.
     const { data: incomplete } = await sb
         .from('threads')
         .select('gmail_thread_id')
         .is('body_text', null)
-        .limit(THREADS_PER_TICK);
+        .limit(THREADS_PER_TICK * 3);
     if (!incomplete?.length)
         return 0;
+    const batch = [...incomplete].sort(() => Math.random() - 0.5).slice(0, THREADS_PER_TICK);
+    const budget = { downloads: MAX_ATTACHMENTS_PER_TICK };
     let healed = 0;
-    for (const row of incomplete) {
+    for (const row of batch) {
+        if (budget.downloads <= 0)
+            break;
         try {
-            await ingestThread(env, sb, token, row.gmail_thread_id);
+            await ingestThread(env, sb, token, row.gmail_thread_id, budget);
+            healed++;
         }
         catch (err) {
             // A thread deleted on Gmail since we first saw it 404s forever. Mark it
-            // complete-and-empty so it stops blocking the heal queue; anything else
-            // is a real failure and should surface.
+            // complete-and-empty so it stops blocking the heal queue.
             if (String(err).includes('-> 404')) {
                 await sb
                     .from('threads')
                     .update({ body_text: '' })
                     .eq('gmail_thread_id', row.gmail_thread_id);
+                healed++;
             }
-            else {
-                throw err;
-            }
+            // Anything else (usually the subrequest ceiling): swallow and move on.
+            // The thread stays incomplete and gets another chance next tick; work
+            // already done inside it is kept and skipped cheaply on the retry.
         }
-        healed++;
     }
     return healed;
 }
-async function processPage(env, sb, run, token) {
-    const page = await gmail.listThreads(token, run.page_token);
-    const ids = (page.threads ?? []).map((t) => t.id);
-    // Already-ingested threads are the resume mechanism: the page is re-listed
-    // each tick and shrinks as its threads land, so a crash mid-page costs only
-    // the threads that were in flight. Only COMPLETED threads count — body_text
-    // is set as the last step of ingestThread, so a null there means the thread
-    // died mid-ingest and must be done again.
-    const { data: known } = await sb
-        .from('threads')
-        .select('gmail_thread_id')
-        .not('body_text', 'is', null)
-        .in('gmail_thread_id', ids.length ? ids : ['-']);
-    const seen = new Set((known ?? []).map((r) => r.gmail_thread_id));
-    const todo = ids.filter((id) => !seen.has(id));
-    if (todo.length === 0) {
-        if (page.nextPageToken) {
-            await sb.from('sync_runs').update({ page_token: page.nextPageToken }).eq('id', run.id);
-            return { status: 'working', threads: run.threads_seen, images: run.images_stored };
-        }
-        await sb
-            .from('sync_runs')
-            .update({ status: 'done', finished_at: new Date().toISOString(), page_token: null })
-            .eq('id', run.id);
-        return { status: 'done', threads: run.threads_seen, images: run.images_stored };
-    }
-    let images = 0;
-    let threads = 0;
-    for (const id of todo.slice(0, THREADS_PER_TICK)) {
-        if (images >= MAX_ATTACHMENTS_PER_TICK)
-            break;
-        images += await ingestThread(env, sb, token, id);
-        threads++;
-    }
-    await sb
-        .from('sync_runs')
-        .update({
-        threads_seen: run.threads_seen + threads,
-        images_stored: run.images_stored + images,
-    })
-        .eq('id', run.id);
-    return {
-        status: 'working',
-        threads: run.threads_seen + threads,
-        images: run.images_stored + images,
-    };
-}
-export async function ingestThread(env, sb, token, threadId) {
+// budget.downloads is the shared per-invocation allowance of attachment
+// downloads. A thread that exhausts it mid-way returns WITHOUT its completion
+// marker, so the next tick resumes it — and the message-level skip below makes
+// that resume cost one query per already-finished message instead of
+// re-downloading everything.
+export async function ingestThread(env, sb, token, threadId, budget = { downloads: Infinity }) {
     const thread = await gmail.getThread(token, threadId);
     const messages = thread.messages ?? [];
     if (messages.length === 0)
@@ -172,9 +184,42 @@ export async function ingestThread(env, sb, token, threadId) {
         .single();
     if (threadErr || !threadRow)
         throw new Error(`thread upsert: ${threadErr?.message}`);
+    // Which messages already have every qualifying image recorded? Two queries
+    // for the whole thread, so a resumed thread skips its finished messages at
+    // almost no cost instead of re-downloading them.
+    const { data: existingMsgs } = await sb
+        .from('messages')
+        .select('id, gmail_message_id')
+        .eq('thread_id', threadRow.id);
+    const msgIdByGmail = new Map((existingMsgs ?? []).map((m) => [
+        m.gmail_message_id,
+        m.id,
+    ]));
+    const { data: occRows } = await sb
+        .from('asset_occurrences')
+        .select('message_id')
+        .in('message_id', [...msgIdByGmail.values(), '00000000-0000-0000-0000-000000000000']);
+    const occCount = new Map();
+    for (const o of (occRows ?? [])) {
+        occCount.set(o.message_id, (occCount.get(o.message_id) ?? 0) + 1);
+    }
     let stored = 0;
+    let ranOutOfBudget = false;
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
+        const parts = gmail.imageParts(msg.payload).filter((p) => !p.size || p.size >= 25_000);
+        // Already fully recorded on a previous pass — skip without any writes.
+        const knownId = msgIdByGmail.get(msg.id);
+        if (knownId && parts.length > 0 && (occCount.get(knownId) ?? 0) >= parts.length)
+            continue;
+        if (knownId && parts.length === 0)
+            continue;
+        if (budget.downloads < parts.length) {
+            // Not enough allowance to finish this message this tick. Stop here with
+            // no completion marker; the next tick picks the thread up again.
+            ranOutOfBudget = true;
+            break;
+        }
         const { data: messageRow, error: msgErr } = await sb
             .from('messages')
             .upsert({
@@ -189,16 +234,15 @@ export async function ingestThread(env, sb, token, threadId) {
             .single();
         if (msgErr || !messageRow)
             throw new Error(`message upsert: ${msgErr?.message}`);
-        for (const part of gmail.imageParts(msg.payload)) {
-            // The size filter runs before the download, not after — the cheapest way
-            // to skip a signature logo is to never fetch it.
-            if (part.size && part.size < 25_000)
-                continue;
+        for (const part of parts) {
             const bytes = await gmail.getAttachment(token, msg.id, part.attachmentId);
+            budget.downloads--;
             if (await recordAttachment(env, sb, messageRow.id, part, bytes, metas[i].sentAt))
                 stored++;
         }
     }
+    if (ranOutOfBudget)
+        return stored;
     // Completion marker — only now does the skip-check treat this thread as done.
     const { error: doneErr } = await sb
         .from('threads')
@@ -226,6 +270,17 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         // Rejected images are still stored. A wrong threshold should be a setting
         // to change and re-run, not a photo we threw away.
         const { key, thumb } = await store(env, sha, bytes, part.mimeType);
+        // Visual fingerprint for "similar images". Failure-tolerant: a format the
+        // pipeline can't fingerprint just leaves the column null and the visual
+        // backfill tick retries it later.
+        let visual = null;
+        try {
+            const { visualFingerprint, toVectorLiteral } = await import('../lib/visual');
+            visual = toVectorLiteral(await visualFingerprint(env, new Response(bytes).body));
+        }
+        catch {
+            visual = null;
+        }
         const { data: created, error } = await sb
             .from('assets')
             .insert({
@@ -241,6 +296,7 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
             occurrence_count: 1,
             first_seen_at: when,
             last_seen_at: when,
+            visual,
         })
             .select('id')
             .single();
@@ -365,8 +421,11 @@ export async function incrementalTick(env) {
         return { status: 'working', message: 'history expired, restarted backfill' };
     }
     let images = 0;
+    const budget = { downloads: MAX_ATTACHMENTS_PER_TICK };
     for (const id of result.threadIds.slice(0, THREADS_PER_TICK)) {
-        images += await ingestThread(env, sb, token, id);
+        if (budget.downloads <= 0)
+            break;
+        images += await ingestThread(env, sb, token, id, budget);
     }
     // Only advance the watermark once every thread it covered is ingested —
     // otherwise a mid-batch failure would skip the remainder permanently.

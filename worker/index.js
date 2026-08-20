@@ -3,6 +3,7 @@ import { api } from './routes/api';
 import { auth } from './routes/auth';
 import { incrementalTick, ingestTick } from './jobs/ingest';
 import { tagTick } from './jobs/tag';
+import { visualTick } from './jobs/visual';
 const app = new Hono();
 app.route('/api', api);
 app.route('/auth', auth);
@@ -20,6 +21,9 @@ export default {
         }
         ctx.waitUntil((async () => {
             const ingest = await logged('ingest', () => ingestTick(env));
+            // Fingerprinting runs its own small batch every tick — it reads from
+            // R2, not Gmail, so it doesn't contend with ingest for rate limits.
+            await logged('visual', () => visualTick(env));
             // Tagging only runs when ingest has nothing left to do this tick, so
             // the two never contend for the same Worker budget.
             if (ingest?.status !== 'working')

@@ -82,6 +82,11 @@ export const api = {
   removeTag: (id: string, tagId: string) =>
     request(`/assets/${id}/tags/${tagId}`, { method: 'DELETE' }),
 
+  similar: (id: string) =>
+    request<{ results: (SearchResult & { distance: number | null })[] }>(
+      `/assets/${id}/similar`,
+    ),
+
   bulkTag: (assetIds: string[], tagIds: string[]) =>
     request<{ ok: true; tagged: number }>(`/assets/tags/bulk`, {
       method: 'POST',
