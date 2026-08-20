@@ -6,6 +6,7 @@ import { connectUrl } from './auth'
 import { embed } from '../lib/tagging'
 import { ingestTick } from '../jobs/ingest'
 import { tagTick } from '../jobs/tag'
+import { rebuildSearchRows } from '../lib/search'
 import { FACETS } from '../../shared/vocab'
 
 type Vars = { userId: string }
@@ -211,62 +212,6 @@ api.post('/assets/tags/bulk', async (c) => {
   await rebuildSearchRows(c.env, asset_ids)
   return c.json({ ok: true, tagged: asset_ids.length })
 })
-
-// The search row is the union of everything known about the asset — manual
-// tags, AI analysis if it exists, and the email's own words. Rebuilt whole on
-// every tag change rather than patched, because "recompute from source" cannot
-// drift the way incremental edits do.
-//
-// Batched: a fixed five queries no matter how many assets, because on the
-// Workers free plan every query counts against a 50-subrequest ceiling and a
-// per-asset rebuild of a 48-image bulk tag would blow it four times over.
-async function rebuildSearchRows(env: Env, assetIds: string[]) {
-  if (!assetIds.length) return
-  const sb = db(env)
-  const [{ data: tags }, { data: analyses }, { data: occurrences }] = await Promise.all([
-    sb.from('asset_tags').select('asset_id, tags(value)').in('asset_id', assetIds),
-    sb
-      .from('asset_analysis')
-      .select('asset_id, description, product_name, product_code, size_mm')
-      .in('asset_id', assetIds),
-    sb
-      .from('asset_occurrences')
-      .select('asset_id, filename, messages(threads(subject, body_text))')
-      .in('asset_id', assetIds),
-  ])
-
-  const tagsById = new Map<string, string[]>()
-  for (const t of (tags ?? []) as any[]) {
-    if (t.tags?.value) (tagsById.get(t.asset_id) ?? tagsById.set(t.asset_id, []).get(t.asset_id)!).push(t.tags.value)
-  }
-  const analysisById = new Map((analyses ?? []).map((a: any) => [a.asset_id, a]))
-  const occById = new Map<string, any>()
-  for (const o of (occurrences ?? []) as any[]) {
-    if (!occById.has(o.asset_id)) occById.set(o.asset_id, o)
-  }
-
-  const rows = assetIds.map((id) => {
-    const analysis = analysisById.get(id) as any
-    const occ = occById.get(id)
-    const thread = occ?.messages?.threads
-    return {
-      asset_id: id,
-      content: [
-        analysis?.description,
-        analysis?.product_name,
-        analysis?.product_code,
-        analysis?.size_mm,
-        (tagsById.get(id) ?? []).join(' '),
-        occ?.filename,
-        thread?.subject,
-        (thread?.body_text ?? '').slice(0, 4000),
-      ]
-        .filter(Boolean)
-        .join('\n'),
-    }
-  })
-  await sb.from('asset_search').upsert(rows, { onConflict: 'asset_id' })
-}
 
 // Reversing a filter call — the reason every rejected asset keeps its bytes.
 api.post('/assets/:id/status', async (c) => {

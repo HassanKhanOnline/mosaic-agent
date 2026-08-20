@@ -47,7 +47,50 @@ export async function visualFingerprint(env: Env, source: ReadableStream): Promi
 
   // L2-normalise so cosine distance ignores overall exposure differences.
   const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1
-  return vec.map((v) => v / norm)
+  return canonicalize(vec.map((v) => v / norm))
+}
+
+// Rotation canonicalisation. The same photo often re-enters the mailbox
+// rotated (EXIF orientation flags survive some forwards and not others — seen
+// on a real pair from this mailbox), and a rotated grid is a very different
+// vector. All four rotations of a 6x6 grid are index permutations, so we can
+// compute every variant from the vector alone and store the lexicographically
+// smallest: any rotation of the same image lands on the same canonical form,
+// and plain cosine then treats rotations as identical — for both duplicate
+// detection and the Similar strip.
+function canonicalize(vec: number[]): number[] {
+  const variants = [vec]
+  let current = vec
+  for (let r = 0; r < 3; r++) {
+    current = rotateGrid(current)
+    variants.push(current)
+  }
+  variants.sort((a, b) => {
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i]
+    }
+    return 0
+  })
+  return variants[0]
+}
+
+function rotateGrid(vec: number[]): number[] {
+  const out = new Array(VISUAL_DIMS).fill(0)
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) {
+      // 90° clockwise: destination (r, c) reads from source (GRID-1-c, r).
+      const src = ((GRID - 1 - c) * GRID + r) * 3
+      const dst = (r * GRID + c) * 3
+      out[dst] = vec[src]
+      out[dst + 1] = vec[src + 1]
+      out[dst + 2] = vec[src + 2]
+    }
+  }
+  return out
+}
+
+export function parseVectorLiteral(s: string): number[] {
+  return s.slice(1, -1).split(',').map(Number)
 }
 
 // pgvector accepts the '[a,b,c]' literal form through PostgREST.

@@ -267,12 +267,9 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
     else {
         const dims = dimensions(bytes);
         const verdict = classify(bytes.length, dims);
-        // Rejected images are still stored. A wrong threshold should be a setting
-        // to change and re-run, not a photo we threw away.
-        const { key, thumb } = await store(env, sha, bytes, part.mimeType);
-        // Visual fingerprint for "similar images". Failure-tolerant: a format the
-        // pipeline can't fingerprint just leaves the column null and the visual
-        // backfill tick retries it later.
+        // Visual fingerprint, computed BEFORE anything is stored: it doubles as
+        // the near-duplicate check. Failure-tolerant — a format the pipeline
+        // can't fingerprint leaves the column null and the visual tick retries.
         let visual = null;
         try {
             const { visualFingerprint, toVectorLiteral } = await import('../lib/visual');
@@ -281,6 +278,27 @@ async function recordAttachment(env, sb, messageId, part, bytes, sentAt) {
         catch {
             visual = null;
         }
+        // The same picture re-encoded or rotated by a forward hashes differently
+        // but fingerprints identically. If a near-exact copy already exists,
+        // attach this occurrence to it and store nothing — the space saving
+        // happens here, before any bytes land in R2.
+        if (visual && !verdict.reject) {
+            const { MERGE_DISTANCE } = await import('./dedupe');
+            const { data: nn } = await sb.rpc('nearest_asset', { query_visual: visual, exclude_id: null });
+            const nearest = nn?.[0];
+            if (nearest && nearest.distance <= MERGE_DISTANCE) {
+                const { data: match } = await sb
+                    .from('assets')
+                    .select('id, occurrence_count, first_seen_at, last_seen_at, status')
+                    .eq('id', nearest.asset_id)
+                    .single();
+                if (match)
+                    return recordExisting(sb, match, messageId, part, when);
+            }
+        }
+        // Rejected images are still stored. A wrong threshold should be a setting
+        // to change and re-run, not a photo we threw away.
+        const { key, thumb } = await store(env, sha, bytes, part.mimeType);
         const { data: created, error } = await sb
             .from('assets')
             .insert({
