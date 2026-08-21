@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Env } from '../lib/env'
 import { db } from '../lib/db'
 import { visualFingerprint, toVectorLiteral } from '../lib/visual'
+import { thumbKey } from '../lib/images'
 
 // Fingerprints assets stored before the visual column existed (or whose
 // ingest-time attempt failed). Reads the original back from R2 — the binding
@@ -13,7 +14,7 @@ export async function visualTick(env: Env): Promise<{ done: number; remaining: n
 
   const { data: pending, count } = await sb
     .from('assets')
-    .select('id, r2_key', { count: 'exact' })
+    .select('id, r2_key, thumb_key, sha256', { count: 'exact' })
     .is('visual', null)
     .in('status', ['pending', 'ready'])
     .limit(ASSETS_PER_TICK * 3)
@@ -25,15 +26,52 @@ export async function visualTick(env: Env): Promise<{ done: number; remaining: n
   const batch = [...pending].sort(() => Math.random() - 0.5).slice(0, ASSETS_PER_TICK)
 
   let done = 0
+  let firstError: string | null = null
   for (const asset of batch) {
     try {
       const object = await env.BUCKET.get(asset.r2_key)
       if (!object) continue
-      const vec = await visualFingerprint(env, object.body as ReadableStream)
-      await sb.from('assets').update({ visual: toVectorLiteral(vec) }).eq('id', asset.id)
+      // One R2 read serves both jobs: buffer the original, then stream it
+      // into the fingerprint and — when the ingest-time attempt failed, as it
+      // did for everything stored during the Images quota outage — into a
+      // replacement thumbnail.
+      const bytes = new Uint8Array(await object.arrayBuffer())
+      const vec = await visualFingerprint(
+        env,
+        new Response(bytes as BufferSource).body as ReadableStream,
+      )
+
+      let thumb: string | null = asset.thumb_key
+      if (!thumb) {
+        try {
+          const result = await env.IMAGES.input(
+            new Response(bytes as BufferSource).body as ReadableStream,
+          )
+            .transform({ width: 400, fit: 'scale-down' })
+            .output({ format: 'image/webp', quality: 80 })
+          thumb = thumbKey(asset.sha256)
+          await env.BUCKET.put(thumb, result.image(), {
+            httpMetadata: { contentType: 'image/webp' },
+          })
+        } catch {
+          thumb = null
+        }
+      }
+
+      const { error } = await sb
+        .from('assets')
+        .update({ visual: toVectorLiteral(vec), thumb_key: thumb })
+        .eq('id', asset.id)
+      if (error) throw new Error(`update: ${error.message}`)
       done++
-    } catch {
-      // Left null; retried on a later tick, deprioritised by the shuffle.
+    } catch (err) {
+      // Left null; retried on a later tick, deprioritised by the shuffle. The
+      // first failure per tick is logged — a batch that fails wholesale would
+      // otherwise be indistinguishable from one that never ran.
+      if (!firstError) {
+        firstError = String(err).slice(0, 300)
+        console.log('visual error sample:', firstError)
+      }
     }
   }
 
