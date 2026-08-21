@@ -1,3 +1,8 @@
+-- FRESH PROJECTS ONLY. This is the concatenation of every migration for a
+-- first-time setup and is NOT re-runnable on a database that already has any
+-- of them applied (0004 will collide). For catching up an existing database,
+-- run the individual migration files you are missing, or a fix-*.sql.
+
 -- Mosaic Agent — initial schema.
 --
 -- One mailbox, one shared library. Everyone who can log in sees everything,
