@@ -9,7 +9,7 @@ import { rebuildSearchRows } from '../lib/search'
 // ~0.999; two different photos of a similar tile score well below 0.99.
 export const MERGE_DISTANCE = 0.005
 
-const ASSETS_PER_TICK = 12
+const ASSETS_PER_TICK = 40
 
 export async function dedupeTick(env: Env): Promise<{ checked: number; merged: number; remaining: number }> {
   const sb = db(env)

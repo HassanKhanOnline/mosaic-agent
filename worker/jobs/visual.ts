@@ -6,7 +6,7 @@ import { visualFingerprint, toVectorLiteral } from '../lib/visual'
 // Fingerprints assets stored before the visual column existed (or whose
 // ingest-time attempt failed). Reads the original back from R2 — the binding
 // re-renders it to 24x24, so the source format doesn't matter.
-const ASSETS_PER_TICK = 25
+const ASSETS_PER_TICK = 100
 
 export async function visualTick(env: Env): Promise<{ done: number; remaining: number }> {
   const sb: SupabaseClient = db(env)
