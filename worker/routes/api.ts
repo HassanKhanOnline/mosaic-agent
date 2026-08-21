@@ -41,7 +41,9 @@ api.get('/img/:sha', async (c) => {
 
   return new Response(object.body, {
     headers: {
-      'content-type': variant === 'thumb' && asset.thumb_key ? 'image/webp' : asset.mime,
+      // The object knows its own type — thumbnails have been webp and jpeg
+      // over the project's life, and the original is whatever Gmail sent.
+      'content-type': object.httpMetadata?.contentType ?? asset.mime,
       // Safe to cache hard: the key is a content hash, so the bytes behind it
       // can never change.
       'cache-control': 'private, max-age=3600, immutable',

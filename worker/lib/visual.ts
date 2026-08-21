@@ -1,35 +1,28 @@
-import type { Env } from './env'
-
-// The visual fingerprint: run the image through Cloudflare Images to a 24x24
-// PNG, decode that PNG in pure JS (tiny, so the decode is trivial), then take
-// a 6x6 grid of average RGB and L2-normalise. 108 floats that capture
-// palette, tone and coarse texture — for tile photos, that IS similarity.
-//
-// PNG rather than raw because the Images binding only emits encoded formats.
-// At 24x24 the IDAT is a few hundred bytes; DecompressionStream handles the
-// zlib, and the unfilter pass below handles the five PNG filter types.
+// The visual fingerprint: a 6x6 grid of average RGB over a 24x24 render of
+// the full frame, L2-normalised, rotation-canonicalised. 108 floats that
+// capture palette, tone and coarse texture — for tile photos, that IS
+// similarity. Pixels come from Photon (see pixels.ts); this module is pure
+// arithmetic.
 
 export const VISUAL_DIMS = 108
-const SIZE = 24
 const GRID = 6
 
-export async function visualFingerprint(env: Env, source: ReadableStream): Promise<number[]> {
-  const result = await env.IMAGES.input(source)
-    // squeeze, not scale-down: similarity wants the full frame mapped onto
-    // the grid, aspect ratio be damned — two crops of the same tile should
-    // land near each other, and letterboxing would poison the edge cells.
-    .transform({ width: SIZE, height: SIZE, fit: 'squeeze' })
-    .output({ format: 'image/png' })
-  const png = new Uint8Array(await new Response(result.image()).arrayBuffer())
-  const { pixels, channels, width, height } = await decodePng(png)
-
-  // Average RGB per grid cell.
-  const cell = SIZE / GRID
+// pixels: interleaved rows, `channels` bytes per pixel, RGB in the first
+// three. Any resolution works; 24x24 is what pixels.ts feeds it.
+export function gridFingerprint(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: number,
+): number[] {
+  const cellW = width / GRID
+  const cellH = height / GRID
   const vec = new Array(VISUAL_DIMS).fill(0)
   const counts = new Array(GRID * GRID).fill(0)
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const gi = Math.min(GRID - 1, Math.floor(y / cell)) * GRID + Math.min(GRID - 1, Math.floor(x / cell))
+      const gi =
+        Math.min(GRID - 1, Math.floor(y / cellH)) * GRID + Math.min(GRID - 1, Math.floor(x / cellW))
       const p = (y * width + x) * channels
       vec[gi * 3] += pixels[p] / 255
       vec[gi * 3 + 1] += pixels[p + 1] / 255
@@ -96,92 +89,4 @@ export function parseVectorLiteral(s: string): number[] {
 // pgvector accepts the '[a,b,c]' literal form through PostgREST.
 export function toVectorLiteral(vec: number[]): string {
   return `[${vec.map((v) => v.toFixed(6)).join(',')}]`
-}
-
-// Minimal PNG decoder for the constrained case the Images binding produces:
-// 8-bit, truecolor (2) or truecolor-alpha (6), non-interlaced.
-async function decodePng(bytes: Uint8Array): Promise<{
-  pixels: Uint8Array
-  channels: number
-  width: number
-  height: number
-}> {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  if (view.getUint32(0) !== 0x89504e47) throw new Error('not a png')
-
-  let width = 0
-  let height = 0
-  let colorType = -1
-  let bitDepth = 0
-  let interlace = 0
-  const idat: Uint8Array[] = []
-
-  let off = 8
-  while (off < bytes.length) {
-    const len = view.getUint32(off)
-    const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7])
-    const data = bytes.subarray(off + 8, off + 8 + len)
-    if (type === 'IHDR') {
-      width = view.getUint32(off + 8)
-      height = view.getUint32(off + 12)
-      bitDepth = bytes[off + 16]
-      colorType = bytes[off + 17]
-      interlace = bytes[off + 20]
-    } else if (type === 'IDAT') {
-      idat.push(data)
-    } else if (type === 'IEND') {
-      break
-    }
-    off += 12 + len
-  }
-
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6) || interlace !== 0) {
-    throw new Error(`unsupported png layout: depth=${bitDepth} color=${colorType} interlace=${interlace}`)
-  }
-  const channels = colorType === 6 ? 4 : 3
-
-  const compressed = new Blob(idat as BlobPart[])
-  const raw = new Uint8Array(
-    await new Response(
-      compressed.stream().pipeThrough(new DecompressionStream('deflate')),
-    ).arrayBuffer(),
-  )
-
-  // Unfilter: each scanline is 1 filter byte + width*channels bytes.
-  const stride = width * channels
-  const pixels = new Uint8Array(stride * height)
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)]
-    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1))
-    const out = pixels.subarray(y * stride, (y + 1) * stride)
-    const prev = y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : null
-    for (let i = 0; i < stride; i++) {
-      const a = i >= channels ? out[i - channels] : 0
-      const b = prev ? prev[i] : 0
-      const c = prev && i >= channels ? prev[i - channels] : 0
-      let value = line[i]
-      switch (filter) {
-        case 1:
-          value += a
-          break
-        case 2:
-          value += b
-          break
-        case 3:
-          value += (a + b) >> 1
-          break
-        case 4: {
-          const p = a + b - c
-          const pa = Math.abs(p - a)
-          const pb = Math.abs(p - b)
-          const pc = Math.abs(p - c)
-          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c
-          break
-        }
-      }
-      out[i] = value & 0xff
-    }
-  }
-
-  return { pixels, channels, width, height }
 }

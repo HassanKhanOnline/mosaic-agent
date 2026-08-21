@@ -104,7 +104,9 @@ export function objectKey(sha256: string, mime: string): string {
 }
 
 export function thumbKey(sha256: string): string {
-  return `thumb/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}.webp`
+  // .jpg since the Photon switch; earlier .webp thumbnails keep working — the
+  // stored thumb_key and the object's own content-type are what get served.
+  return `thumb/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}.jpg`
 }
 
 export async function store(
@@ -116,20 +118,20 @@ export async function store(
   const key = objectKey(sha256, mime)
   await env.BUCKET.put(key, bytes as BufferSource, { httpMetadata: { contentType: mime } })
 
-  // A 400px webp keeps the search grid to a few hundred KB instead of tens of
-  // megabytes. Optional on purpose: accounts without Cloudflare Images enabled
-  // still get a working library, just heavier thumbnails.
+  // A 400px jpeg keeps the search grid to a few hundred KB instead of tens of
+  // megabytes. Generated in-Worker by Photon — no Images quota involved.
+  // Optional on purpose: an undecodable format just means no thumbnail, and
+  // the UI falls back to the original.
   let thumb: string | null = null
   try {
-    const result = await env.IMAGES.input(
-      new Response(bytes as BufferSource).body as ReadableStream,
-    )
-      .transform({ width: 400, fit: 'scale-down' })
-      .output({ format: 'image/webp', quality: 80 })
-    thumb = thumbKey(sha256)
-    await env.BUCKET.put(thumb, result.image(), {
-      httpMetadata: { contentType: 'image/webp' },
-    })
+    const { processImage } = await import('./pixels')
+    const { thumb: thumbBytes } = processImage(bytes, true)
+    if (thumbBytes) {
+      thumb = thumbKey(sha256)
+      await env.BUCKET.put(thumb, thumbBytes as unknown as ArrayBuffer, {
+        httpMetadata: { contentType: 'image/jpeg' },
+      })
+    }
   } catch {
     thumb = null
   }

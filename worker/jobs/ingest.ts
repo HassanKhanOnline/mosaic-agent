@@ -319,14 +319,13 @@ async function recordAttachment(
     const verdict = classify(bytes.length, dims)
 
     // Visual fingerprint, computed BEFORE anything is stored: it doubles as
-    // the near-duplicate check. Failure-tolerant — a format the pipeline
-    // can't fingerprint leaves the column null and the visual tick retries.
+    // the near-duplicate check. Failure-tolerant — a format Photon can't
+    // decode leaves the column null and the visual tick retries.
     let visual: string | null = null
     try {
-      const { visualFingerprint, toVectorLiteral } = await import('../lib/visual')
-      visual = toVectorLiteral(
-        await visualFingerprint(env, new Response(bytes as BufferSource).body as ReadableStream),
-      )
+      const { processImage } = await import('../lib/pixels')
+      const { toVectorLiteral } = await import('../lib/visual')
+      visual = toVectorLiteral(processImage(bytes, false).fingerprint)
     } catch {
       visual = null
     }

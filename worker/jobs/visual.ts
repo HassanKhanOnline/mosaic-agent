@@ -1,13 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Env } from '../lib/env'
 import { db } from '../lib/db'
-import { visualFingerprint, toVectorLiteral } from '../lib/visual'
+import { toVectorLiteral } from '../lib/visual'
+import { processImage } from '../lib/pixels'
 import { thumbKey } from '../lib/images'
 
 // Fingerprints assets stored before the visual column existed (or whose
-// ingest-time attempt failed). Reads the original back from R2 — the binding
-// re-renders it to 24x24, so the source format doesn't matter.
-const ASSETS_PER_TICK = 100
+// ingest-time attempt failed), and restores thumbnails lost to the Images
+// quota outage while it's there. Decoding happens in-Worker via Photon; the
+// batch is CPU-sized — a 12MP decode costs a few hundred ms, and the paid
+// plan allows 30s CPU per invocation.
+const ASSETS_PER_TICK = 30
 
 export async function visualTick(env: Env): Promise<{ done: number; remaining: number }> {
   const sb: SupabaseClient = db(env)
@@ -31,36 +34,22 @@ export async function visualTick(env: Env): Promise<{ done: number; remaining: n
     try {
       const object = await env.BUCKET.get(asset.r2_key)
       if (!object) continue
-      // One R2 read serves both jobs: buffer the original, then stream it
-      // into the fingerprint and — when the ingest-time attempt failed, as it
-      // did for everything stored during the Images quota outage — into a
-      // replacement thumbnail.
+      // One R2 read, one decode: fingerprint always, replacement thumbnail
+      // whenever the ingest-time one is missing.
       const bytes = new Uint8Array(await object.arrayBuffer())
-      const vec = await visualFingerprint(
-        env,
-        new Response(bytes as BufferSource).body as ReadableStream,
-      )
+      const { fingerprint, thumb: thumbBytes } = processImage(bytes, !asset.thumb_key)
 
       let thumb: string | null = asset.thumb_key
-      if (!thumb) {
-        try {
-          const result = await env.IMAGES.input(
-            new Response(bytes as BufferSource).body as ReadableStream,
-          )
-            .transform({ width: 400, fit: 'scale-down' })
-            .output({ format: 'image/webp', quality: 80 })
-          thumb = thumbKey(asset.sha256)
-          await env.BUCKET.put(thumb, result.image(), {
-            httpMetadata: { contentType: 'image/webp' },
-          })
-        } catch {
-          thumb = null
-        }
+      if (!thumb && thumbBytes) {
+        thumb = thumbKey(asset.sha256)
+        await env.BUCKET.put(thumb, thumbBytes as unknown as ArrayBuffer, {
+          httpMetadata: { contentType: 'image/jpeg' },
+        })
       }
 
       const { error } = await sb
         .from('assets')
-        .update({ visual: toVectorLiteral(vec), thumb_key: thumb })
+        .update({ visual: toVectorLiteral(fingerprint), thumb_key: thumb })
         .eq('id', asset.id)
       if (error) throw new Error(`update: ${error.message}`)
       done++
